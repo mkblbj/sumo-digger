@@ -1,0 +1,33 @@
+# Virtual Environment
+.venv/
+venv/
+.python-version
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+config.txt
+downloads/
+*.local.json
+
+# Logs
+*.log
+
+# Distribution
+dist/
+build/
+*.egg-info/

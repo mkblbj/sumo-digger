@@ -1,0 +1,462 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <!-- ヘッダー -->
+        <div class="text-center mb-4">
+            <h1 class="display-5 fw-bold text-primary">SUUMO物件情報抽出ツール</h1>
+            <p class="lead text-muted">SUUMOの物件URLから詳細情報を抽出してExcel/CSV/JSONファイルに保存します</p>
+        </div>
+
+        <!-- 使い方カード -->
+        <div class="card mb-4 border-primary">
+            <div class="card-header bg-primary text-white">
+                <i class="bi bi-info-circle"></i> 使い方
+            </div>
+            <div class="card-body">
+                <ol class="mb-0">
+                    <li>SUUMO物件のURLを入力（複数の場合は改行で区切る）、またはお気に入りから取得</li>
+                    <li>出力形式を選択（Excel/CSV/JSON）</li>
+                    <li>「抽出開始」ボタンをクリック</li>
+                    <li>抽出完了後、ファイルをダウンロード</li>
+                </ol>
+                <small class="text-warning d-block mt-2">
+                    <i class="bi bi-exclamation-triangle"></i>
+                    サーバー負荷軽減のため、各URLの処理間に2秒の間隔を空けます
+                </small>
+            </div>
+        </div>
+
+        <!-- タブ切り替え -->
+        <ul class="nav nav-tabs mb-3" id="inputTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="manual-tab" data-bs-toggle="tab" data-bs-target="#manual" type="button" role="tab">
+                    <i class="bi bi-keyboard"></i> URL手動入力
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="favorites-tab" data-bs-toggle="tab" data-bs-target="#favorites" type="button" role="tab">
+                    <i class="bi bi-heart"></i> お気に入りから取得
+                </button>
+            </li>
+        </ul>
+
+        <div class="tab-content" id="inputTabsContent">
+            <!-- URL手動入力タブ -->
+            <div class="tab-pane fade show active" id="manual" role="tabpanel">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <i class="bi bi-link-45deg"></i> 物件URL入力
+                    </div>
+                    <div class="card-body">
+                        <textarea
+                            class="form-control"
+                            id="urlInput"
+                            rows="8"
+                            placeholder="URLを改行で区切って入力してください&#10;例: https://suumo.jp/chintai/bc_100000000000/"
+                        ></textarea>
+                        <div class="mt-2 d-flex justify-content-between align-items-center">
+                            <small class="text-muted" id="urlCount">0 URL入力済み</small>
+                            <button class="btn btn-sm btn-outline-secondary" id="clearUrls">
+                                <i class="bi bi-x-circle"></i> クリア
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- お気に入り取得タブ -->
+            <div class="tab-pane fade" id="favorites" role="tabpanel">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <i class="bi bi-person-lock"></i> SUUMOログイン
+                    </div>
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="email" class="form-label">メールアドレス</label>
+                                <input type="email" class="form-control" id="email" placeholder="your@email.com">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="password" class="form-label">パスワード</label>
+                                <input type="password" class="form-control" id="password" placeholder="パスワード">
+                            </div>
+                        </div>
+                        <div class="d-flex gap-2 mt-3">
+                            <button class="btn btn-outline-primary" id="getFavoritesBtn">
+                                <i class="bi bi-heart-fill"></i> お気に入りを取得
+                            </button>
+                            <button class="btn btn-primary" id="getFavoritesAndScrapeBtn">
+                                <i class="bi bi-play-fill"></i> 取得して抽出開始
+                            </button>
+                        </div>
+                        <div id="favoritesStatus" class="mt-2"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- オプション設定 -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <i class="bi bi-gear"></i> オプション
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-6">
+                        <label class="form-label">出力形式</label>
+                        <div class="btn-group w-100" role="group">
+                            <input type="radio" class="btn-check" name="exportFormat" id="formatExcel" value="excel" checked>
+                            <label class="btn btn-outline-primary" for="formatExcel">
+                                <i class="bi bi-file-earmark-spreadsheet"></i> Excel
+                            </label>
+                            <input type="radio" class="btn-check" name="exportFormat" id="formatCsv" value="csv">
+                            <label class="btn btn-outline-primary" for="formatCsv">
+                                <i class="bi bi-filetype-csv"></i> CSV
+                            </label>
+                            <input type="radio" class="btn-check" name="exportFormat" id="formatJson" value="json">
+                            <label class="btn btn-outline-primary" for="formatJson">
+                                <i class="bi bi-filetype-json"></i> JSON
+                            </label>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="delayInput" class="form-label">リクエスト間隔（秒）</label>
+                        <input type="number" class="form-control" id="delayInput" value="2" min="1" max="10">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 実行ボタン -->
+        <div class="d-grid gap-2 mb-4">
+            <button class="btn btn-primary btn-lg" id="startScrapeBtn">
+                <i class="bi bi-play-fill"></i> 抽出開始
+            </button>
+        </div>
+
+        <!-- 進捗表示 -->
+        <div class="card mb-4 d-none" id="progressCard">
+            <div class="card-header">
+                <i class="bi bi-hourglass-split"></i> 進捗状況
+            </div>
+            <div class="card-body">
+                <div class="progress mb-3" style="height: 25px;">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" id="progressBar" role="progressbar" style="width: 0%;">
+                        0%
+                    </div>
+                </div>
+                <p class="mb-1" id="progressText">準備中...</p>
+                <small class="text-muted" id="currentUrl"></small>
+            </div>
+        </div>
+
+        <!-- 結果表示 -->
+        <div class="card mb-4 d-none" id="resultCard">
+            <div class="card-header bg-success text-white">
+                <i class="bi bi-check-circle"></i> 完了
+            </div>
+            <div class="card-body">
+                <p id="resultText"></p>
+                <div class="btn-group">
+                    <button class="btn btn-success" id="downloadBtn">
+                        <i class="bi bi-download"></i> ダウンロード
+                    </button>
+                    <button class="btn btn-outline-secondary" id="newScrapeBtn">
+                        <i class="bi bi-plus-circle"></i> 新しいスクレイピング
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- エラー表示 -->
+        <div class="card mb-4 d-none" id="errorCard">
+            <div class="card-header bg-danger text-white">
+                <i class="bi bi-exclamation-triangle"></i> エラー
+            </div>
+            <div class="card-body">
+                <ul id="errorList" class="mb-0"></ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // 状態管理
+    let currentTaskId = null;
+    let eventSource = null;
+
+    // DOM要素
+    const urlInput = document.getElementById('urlInput');
+    const urlCount = document.getElementById('urlCount');
+    const clearUrlsBtn = document.getElementById('clearUrls');
+    const startScrapeBtn = document.getElementById('startScrapeBtn');
+    const progressCard = document.getElementById('progressCard');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const currentUrlEl = document.getElementById('currentUrl');
+    const resultCard = document.getElementById('resultCard');
+    const resultText = document.getElementById('resultText');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const newScrapeBtn = document.getElementById('newScrapeBtn');
+    const errorCard = document.getElementById('errorCard');
+    const errorList = document.getElementById('errorList');
+    const getFavoritesBtn = document.getElementById('getFavoritesBtn');
+    const getFavoritesAndScrapeBtn = document.getElementById('getFavoritesAndScrapeBtn');
+    const favoritesStatus = document.getElementById('favoritesStatus');
+
+    // URL入力カウント
+    urlInput.addEventListener('input', updateUrlCount);
+
+    function updateUrlCount() {
+        const urls = urlInput.value.split('\n').filter(url => url.trim());
+        urlCount.textContent = `${urls.length} URL入力済み`;
+    }
+
+    // URLクリア
+    clearUrlsBtn.addEventListener('click', () => {
+        urlInput.value = '';
+        updateUrlCount();
+    });
+
+    // お気に入り取得
+    getFavoritesBtn.addEventListener('click', async () => {
+        const email = document.getElementById('email').value.trim();
+        const password = document.getElementById('password').value.trim();
+
+        if (!email || !password) {
+            showAlert(favoritesStatus, 'danger', 'メールアドレスとパスワードを入力してください');
+            return;
+        }
+
+        getFavoritesBtn.disabled = true;
+        showAlert(favoritesStatus, 'info', '<span class="spinner-border spinner-border-sm"></span> お気に入りを取得中...');
+
+        try {
+            const response = await fetch('/api/favorites', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                urlInput.value = data.urls.join('\n');
+                updateUrlCount();
+                showAlert(favoritesStatus, 'success', `${data.count}件のお気に入りを取得しました`);
+
+                // URL入力タブに切り替え
+                document.getElementById('manual-tab').click();
+            } else {
+                showAlert(favoritesStatus, 'danger', data.error || 'エラーが発生しました');
+            }
+        } catch (error) {
+            showAlert(favoritesStatus, 'danger', 'ネットワークエラーが発生しました');
+        } finally {
+            getFavoritesBtn.disabled = false;
+        }
+    });
+
+    // お気に入り取得して抽出開始
+    getFavoritesAndScrapeBtn.addEventListener('click', async () => {
+        const email = document.getElementById('email').value.trim();
+        const password = document.getElementById('password').value.trim();
+
+        if (!email || !password) {
+            showAlert(favoritesStatus, 'danger', 'メールアドレスとパスワードを入力してください');
+            return;
+        }
+
+        getFavoritesBtn.disabled = true;
+        getFavoritesAndScrapeBtn.disabled = true;
+        showAlert(favoritesStatus, 'info', '<span class="spinner-border spinner-border-sm"></span> お気に入りを取得中...');
+
+        try {
+            const response = await fetch('/api/favorites', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                urlInput.value = data.urls.join('\n');
+                updateUrlCount();
+                showAlert(favoritesStatus, 'success', `${data.count}件のお気に入りを取得しました。抽出を開始します...`);
+
+                // 自動的に抽出開始
+                if (data.urls.length > 0) {
+                    setTimeout(() => {
+                        startScrapeBtn.click();
+                    }, 500);
+                } else {
+                    showAlert(favoritesStatus, 'warning', 'お気に入りが0件でした');
+                }
+            } else {
+                showAlert(favoritesStatus, 'danger', data.error || 'エラーが発生しました');
+            }
+        } catch (error) {
+            showAlert(favoritesStatus, 'danger', 'ネットワークエラーが発生しました');
+        } finally {
+            getFavoritesBtn.disabled = false;
+            getFavoritesAndScrapeBtn.disabled = false;
+        }
+    });
+
+    // スクレイピング開始
+    startScrapeBtn.addEventListener('click', async () => {
+        const urls = urlInput.value.split('\n').filter(url => url.trim());
+        const delay = parseInt(document.getElementById('delayInput').value) || 2;
+        const format = document.querySelector('input[name="exportFormat"]:checked').value;
+
+        if (urls.length === 0) {
+            alert('URLを入力してください');
+            return;
+        }
+
+        // UI更新
+        startScrapeBtn.disabled = true;
+        progressCard.classList.remove('d-none');
+        resultCard.classList.add('d-none');
+        errorCard.classList.add('d-none');
+        progressBar.style.width = '0%';
+        progressBar.textContent = '0%';
+        progressText.textContent = '準備中...';
+        currentUrlEl.textContent = '';
+
+        try {
+            // スクレイピング開始リクエスト
+            const response = await fetch('/api/scrape', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ urls, delay })
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                currentTaskId = data.task_id;
+                connectSSE(data.task_id, format);
+            } else {
+                showError(data.error || 'スクレイピングの開始に失敗しました');
+                startScrapeBtn.disabled = false;
+            }
+        } catch (error) {
+            showError('ネットワークエラーが発生しました');
+            startScrapeBtn.disabled = false;
+        }
+    });
+
+    // SSE接続
+    function connectSSE(taskId, format) {
+        if (eventSource) {
+            eventSource.close();
+        }
+
+        eventSource = new EventSource(`/api/scrape/stream/${taskId}`);
+
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'progress') {
+                updateProgress(data);
+
+                if (data.status === 'completed') {
+                    eventSource.close();
+                    showResult(data, format);
+                } else if (data.status === 'error') {
+                    eventSource.close();
+                    showError('スクレイピング中にエラーが発生しました');
+                }
+            } else if (data.type === 'error') {
+                eventSource.close();
+                showError(data.message);
+            }
+        };
+
+        eventSource.onerror = () => {
+            eventSource.close();
+            // 最終ステータスを取得
+            checkFinalStatus(taskId, format);
+        };
+    }
+
+    // 最終ステータス確認
+    async function checkFinalStatus(taskId, format) {
+        try {
+            const response = await fetch(`/api/scrape/status/${taskId}`);
+            const data = await response.json();
+
+            if (data.status === 'completed') {
+                showResult(data, format);
+            } else if (data.status === 'error') {
+                showError('スクレイピング中にエラーが発生しました');
+            }
+        } catch (error) {
+            showError('ステータスの取得に失敗しました');
+        }
+    }
+
+    // 進捗更新
+    function updateProgress(data) {
+        const percent = Math.round((data.progress / data.total) * 100);
+        progressBar.style.width = `${percent}%`;
+        progressBar.textContent = `${percent}%`;
+        progressText.textContent = `処理中: ${data.progress}/${data.total}件`;
+
+        if (data.current_url) {
+            currentUrlEl.textContent = `現在のURL: ${data.current_url.substring(0, 50)}...`;
+        }
+
+        // エラー表示
+        if (data.errors && data.errors.length > 0) {
+            errorCard.classList.remove('d-none');
+            errorList.innerHTML = data.errors.map(err =>
+                `<li>${err.url ? err.url.substring(0, 40) + '...' : '不明'}: ${err.error}</li>`
+            ).join('');
+        }
+    }
+
+    // 結果表示
+    function showResult(data, format) {
+        startScrapeBtn.disabled = false;
+        progressCard.classList.add('d-none');
+        resultCard.classList.remove('d-none');
+
+        const successCount = data.result_count || (data.total - (data.errors?.length || 0));
+        resultText.textContent = `${successCount}件の物件データを取得しました`;
+
+        // ダウンロードボタン設定
+        downloadBtn.onclick = () => {
+            window.location.href = `/api/download/${currentTaskId}/${format}`;
+        };
+    }
+
+    // エラー表示
+    function showError(message) {
+        startScrapeBtn.disabled = false;
+        progressCard.classList.add('d-none');
+        errorCard.classList.remove('d-none');
+        errorList.innerHTML = `<li>${message}</li>`;
+    }
+
+    // アラート表示
+    function showAlert(element, type, message) {
+        element.innerHTML = `<div class="alert alert-${type} py-2 mb-0">${message}</div>`;
+    }
+
+    // 新しいスクレイピング
+    newScrapeBtn.addEventListener('click', () => {
+        urlInput.value = '';
+        updateUrlCount();
+        resultCard.classList.add('d-none');
+        errorCard.classList.add('d-none');
+        currentTaskId = null;
+    });
+</script>
+{% endblock %}
