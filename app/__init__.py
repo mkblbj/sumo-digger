@@ -5,6 +5,8 @@ import logging
 from flask import Flask
 from flask_cors import CORS
 
+from app.models import db
+
 
 def create_app(config_name: str = None) -> Flask:
     """
@@ -31,6 +33,12 @@ def create_app(config_name: str = None) -> Flask:
 
     # Enable CORS
     CORS(app)
+
+    # Initialize database
+    os.makedirs(os.path.join(os.path.abspath(os.path.dirname(os.path.dirname(__file__))), 'instance'), exist_ok=True)
+    db.init_app(app)
+    with app.app_context():
+        db.create_all()
 
     # Configure logging
     configure_logging(app)

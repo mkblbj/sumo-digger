@@ -1,0 +1,60 @@
+{
+  "app.title": "日益找房",
+  "app.subtitle": "SUUMOから物件情報を取得・翻訳・エクスポート",
+  "app.footer": "日益找房 - SUUMO Digger",
+
+  "nav.home": "ホーム",
+  "nav.results": "結果一覧",
+  "nav.settings": "設定",
+  "nav.theme": "テーマ切り替え",
+  "nav.lang": "中文",
+
+  "howto.title": "使い方",
+  "howto.step1": "SUUMO物件のURLを入力（複数の場合は改行で区切る）、またはお気に入りから取得",
+  "howto.step2": "出力形式を選択（Excel/CSV/JSON）",
+  "howto.step3": "「抽出開始」ボタンをクリック",
+  "howto.step4": "抽出完了後、ファイルをダウンロード",
+  "howto.warning": "サーバー負荷軽減のため、各URLの処理間に2秒の間隔を空けます",
+
+  "tab.manual": "URL手動入力",
+  "tab.favorites": "お気に入りから取得",
+  "tab.search": "検索ページ一括取得",
+
+  "input.title": "物件URL入力",
+  "input.placeholder": "URLを改行で区切って入力してください\n例: https://suumo.jp/chintai/bc_100000000000/",
+  "input.count": "{count} URL入力済み",
+  "input.clear": "クリア",
+
+  "login.title": "SUUMOログイン",
+  "login.email": "メールアドレス",
+  "login.password": "パスワード",
+  "login.getFavorites": "お気に入りを取得",
+  "login.getAndScrape": "取得して抽出開始",
+
+  "options.title": "オプション",
+  "options.format": "出力形式",
+  "options.delay": "リクエスト間隔（秒）",
+
+  "action.start": "抽出開始",
+
+  "progress.title": "進捗状況",
+  "progress.preparing": "準備中...",
+  "progress.processing": "処理中: {current}/{total}件",
+  "progress.currentUrl": "現在のURL: {url}",
+
+  "result.title": "完了",
+  "result.text": "{count}件の物件データを取得しました",
+  "result.download": "ダウンロード",
+  "result.newScrape": "新しいスクレイピング",
+
+  "error.title": "エラー",
+  "error.noUrl": "URLを入力してください",
+  "error.network": "ネットワークエラーが発生しました",
+  "error.emailRequired": "メールアドレスとパスワードを入力してください",
+
+  "search.urlLabel": "SUUMO検索結果ページURL",
+  "search.urlPlaceholder": "SUUMO検索結果ページのURLを貼り付け",
+  "search.maxResults": "最大取得件数",
+  "search.start": "一括取得開始",
+  "search.collecting": "物件リストを収集中..."
+}

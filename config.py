@@ -10,6 +10,13 @@ class Config:
     # Flask settings
     SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
+    # Database
+    SQLALCHEMY_DATABASE_URI = os.environ.get(
+        'DATABASE_URL',
+        'sqlite:///' + os.path.join(os.path.abspath(os.path.dirname(__file__)), 'instance', 'sumo_digger.db')
+    )
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
     # Application settings
     DOWNLOAD_FOLDER = os.environ.get('DOWNLOAD_FOLDER', 'downloads')
     MAX_URLS = int(os.environ.get('MAX_URLS', 100))
@@ -46,3 +53,4 @@ class TestingConfig(Config):
     TESTING = True
     DEBUG = True
     LOG_LEVEL = logging.DEBUG
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'

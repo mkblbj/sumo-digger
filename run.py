@@ -10,7 +10,7 @@ app = create_app(os.environ.get('FLASK_ENV', 'development'))
 if __name__ == '__main__':
     # Get port from environment or use default
     port = int(os.environ.get('PORT', 5001))
-    host = os.environ.get('HOST', '127.0.0.1')
+    host = os.environ.get('HOST', '0.0.0.0')
     debug = os.environ.get('FLASK_DEBUG', '1') == '1'
 
     print(f"""

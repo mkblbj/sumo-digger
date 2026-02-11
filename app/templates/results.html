@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-3">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-clock-history"></i> <span data-i18n="nav.results">结果浏览</span>
+            </div>
+            <div class="list-group list-group-flush" id="taskList">
+                <div class="text-center py-3 text-muted" id="taskListLoading">
+                    <span class="spinner-border spinner-border-sm"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-9">
+        <div id="noSelection" class="text-center text-muted py-5">
+            <i class="bi bi-arrow-left" style="font-size: 2rem;"></i>
+            <p class="mt-2">Select a task from the left</p>
+        </div>
+        <div id="propertyView" class="d-none">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 id="taskTitle" class="mb-0"></h5>
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-primary" id="exportExcel" title="Excel">
+                        <i class="bi bi-file-earmark-spreadsheet"></i> Excel
+                    </button>
+                    <button class="btn btn-outline-primary" id="exportCsv" title="CSV">
+                        <i class="bi bi-filetype-csv"></i> CSV
+                    </button>
+                    <button class="btn btn-outline-primary" id="exportJson" title="JSON">
+                        <i class="bi bi-filetype-json"></i> JSON
+                    </button>
+                </div>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover table-sm" id="propertyTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th>#</th>
+                            <th>物件名</th>
+                            <th>賃料 / 価格</th>
+                            <th>間取り</th>
+                            <th>面積</th>
+                            <th>アクセス</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="propertyTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Property detail modal -->
+<div class="modal fade" id="propertyModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalTitle"></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-primary" id="modalCopyBtn">
+                    <i class="bi bi-clipboard"></i> Copy
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/currency.js') }}"></script>
+<script>
+    let selectedTaskId = null;
+    let currentProperties = [];
+
+    // Load task list
+    async function loadTasks() {
+        try {
+            const res = await fetch('/api/tasks');
+            const tasks = await res.json();
+            const list = document.getElementById('taskList');
+            document.getElementById('taskListLoading').remove();
+
+            if (tasks.length === 0) {
+                list.innerHTML = '<div class="text-center py-3 text-muted">No tasks yet</div>';
+                return;
+            }
+
+            list.innerHTML = tasks.map(t => {
+                const date = new Date(t.created_at).toLocaleDateString();
+                const statusBadge = t.status === 'completed'
+                    ? '<span class="badge bg-success">OK</span>'
+                    : `<span class="badge bg-secondary">${t.status}</span>`;
+                return `
+                    <a href="#" class="list-group-item list-group-item-action task-item" data-task-id="${t.id}">
+                        <div class="d-flex justify-content-between">
+                            <small>${date}</small>
+                            ${statusBadge}
+                        </div>
+                        <div>${t.result_count} / ${t.total} items</div>
+                    </a>
+                `;
+            }).join('');
+
+            // Click handler
+            list.querySelectorAll('.task-item').forEach(el => {
+                el.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    list.querySelectorAll('.task-item').forEach(i => i.classList.remove('active'));
+                    el.classList.add('active');
+                    loadProperties(el.dataset.taskId);
+                });
+            });
+        } catch (e) {
+            console.error('Failed to load tasks:', e);
+        }
+    }
+
+    async function loadProperties(taskId) {
+        selectedTaskId = taskId;
+        document.getElementById('noSelection').classList.add('d-none');
+        document.getElementById('propertyView').classList.remove('d-none');
+
+        try {
+            const res = await fetch(`/api/properties/${taskId}`);
+            const data = await res.json();
+            currentProperties = data.properties;
+
+            document.getElementById('taskTitle').textContent =
+                `${data.task.result_count} items - ${new Date(data.task.created_at).toLocaleString()}`;
+
+            const tbody = document.getElementById('propertyTableBody');
+            tbody.innerHTML = currentProperties.map((p, i) => {
+                const name = p['物件名'] || p['_url'] || '-';
+                const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
+                const layout = p['間取り'] || '-';
+                const area = p['専有面積'] || '-';
+                const access = p['アクセス1'] || '-';
+                return `
+                    <tr>
+                        <td>${i + 1}</td>
+                        <td><a href="#" class="prop-detail" data-idx="${i}">${name.substring(0, 20)}</a></td>
+                        <td class="jpy-amount">${rent}</td>
+                        <td>${layout}</td>
+                        <td>${area}</td>
+                        <td>${access.substring(0, 25)}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-secondary copy-btn" data-idx="${i}" title="Copy">
+                                <i class="bi bi-clipboard"></i>
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+
+            // Apply currency conversion
+            if (typeof CurrencyService !== 'undefined') {
+                await CurrencyService.init();
+                document.querySelectorAll('.jpy-amount').forEach(el => {
+                    el.textContent = CurrencyService.format(el.textContent);
+                });
+            }
+
+            // Detail click
+            tbody.querySelectorAll('.prop-detail').forEach(el => {
+                el.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    showPropertyDetail(parseInt(el.dataset.idx));
+                });
+            });
+
+            // Copy click
+            tbody.querySelectorAll('.copy-btn').forEach(el => {
+                el.addEventListener('click', () => copyProperty(parseInt(el.dataset.idx)));
+            });
+        } catch (e) {
+            console.error('Failed to load properties:', e);
+        }
+    }
+
+    function showPropertyDetail(idx) {
+        const p = currentProperties[idx];
+        if (!p) return;
+
+        document.getElementById('modalTitle').textContent = p['物件名'] || 'Detail';
+        const body = document.getElementById('modalBody');
+
+        const skipKeys = new Set(['_id', '_url', '_has_translation', '_image_urls', 'URL']);
+        const escHtml = (t) => { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
+
+        const isYenField = (k) => /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費/.test(k);
+        const fmtPrice = (txt) => {
+            if (!txt || txt === '-' || typeof CurrencyService === 'undefined' || !CurrencyService.rate) return txt;
+            return CurrencyService.format(txt);
+        };
+
+        // Images
+        const imageHtml = p._image_urls && p._image_urls.length > 0 ? `
+            <div class="mb-3">
+                <div class="d-flex gap-2 overflow-auto pb-2" style="max-width:100%;">
+                    ${p._image_urls.slice(0, 20).map((url, i) =>
+                        `<img src="/api/image/proxy?url=${encodeURIComponent(url)}" class="rounded shadow-sm flex-shrink-0"
+                              style="height:150px; cursor:pointer; object-fit:cover;"
+                              onclick="window.open('/api/image/proxy?url=${encodeURIComponent(url)}','_blank')"
+                              onerror="this.style.display='none'" title="Image ${i+1}" loading="lazy">`
+                    ).join('')}
+                </div>
+                ${p._id ? `<a href="/api/image/zip/${p._id}" class="btn btn-sm btn-outline-success mt-1">
+                    <i class="bi bi-download"></i> 下载全部 ${p._image_urls.length} 张图片 (ZIP)
+                </a>` : ''}
+            </div>
+        ` : '';
+
+        // Key info highlight
+        const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
+        const layout = p['間取り'] || '-';
+        const area = p['専有面積'] || '-';
+        const deposit = p['敷金'] || '-';
+        const keyMoney = p['礼金'] || '-';
+        const location = p['所在地'] || '-';
+        const access1 = p['アクセス1'] || '-';
+
+        const keyInfoHtml = `
+            <div class="row g-2 mb-3">
+                <div class="col-4">
+                    <div class="p-2 bg-primary bg-opacity-10 rounded text-center">
+                        <small class="text-muted d-block">賃料/価格</small>
+                        <strong class="text-primary">${fmtPrice(rent)}</strong>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <small class="text-muted d-block">間取り/面積</small>
+                        <strong>${escHtml(layout)} / ${escHtml(area)}</strong>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <small class="text-muted d-block">敷金/礼金</small>
+                        <strong>${escHtml(deposit)} / ${escHtml(keyMoney)}</strong>
+                    </div>
+                </div>
+            </div>
+            <p class="mb-2 small text-muted">
+                <i class="bi bi-geo-alt"></i> ${escHtml(location)}
+                &nbsp;|&nbsp; <i class="bi bi-train-front"></i> ${escHtml(access1)}
+            </p>`;
+
+        // Complete 物件概要 table (all fields)
+        const rows = Object.entries(p)
+            .filter(([k]) => !skipKeys.has(k))
+            .map(([k, v]) => {
+                const val = isYenField(k) ? fmtPrice(String(v || '-')) : escHtml(String(v || '-'));
+                return `<tr><th class="text-nowrap bg-light" style="width:160px;">${escHtml(k)}</th><td>${val}</td></tr>`;
+            }).join('');
+
+        body.innerHTML = `
+            ${imageHtml}
+            ${keyInfoHtml}
+            <h6 class="border-bottom pb-1 mb-2"><i class="bi bi-list-ul"></i> 物件概要</h6>
+            <table class="table table-sm table-bordered mb-3">${rows}</table>
+            <a href="${escHtml(p._url || p.URL || '#')}" target="_blank" class="btn btn-sm btn-outline-primary">
+                <i class="bi bi-box-arrow-up-right"></i> SUUMO で見る
+            </a>
+        `;
+
+        document.getElementById('modalCopyBtn').onclick = () => copyProperty(idx);
+        new bootstrap.Modal(document.getElementById('propertyModal')).show();
+    }
+
+    function copyProperty(idx) {
+        const p = currentProperties[idx];
+        if (!p) return;
+        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls'];
+        const text = Object.entries(p)
+            .filter(([k]) => !skipKeys.includes(k))
+            .map(([k, v]) => `${k}: ${v || '-'}`)
+            .join('\n');
+        navigator.clipboard.writeText(text).then(() => {
+            // Brief feedback
+            const btn = document.querySelector(`.copy-btn[data-idx="${idx}"]`);
+            if (btn) {
+                const orig = btn.innerHTML;
+                btn.innerHTML = '<i class="bi bi-check"></i>';
+                setTimeout(() => { btn.innerHTML = orig; }, 1000);
+            }
+        });
+    }
+
+    // Export buttons
+    ['Excel', 'Csv', 'Json'].forEach(fmt => {
+        document.getElementById(`export${fmt}`).addEventListener('click', () => {
+            if (selectedTaskId) {
+                window.location.href = `/api/download/${selectedTaskId}/${fmt.toLowerCase()}`;
+            }
+        });
+    });
+
+    loadTasks().then(() => {
+        // Auto-select task from URL param (redirect from home page)
+        const params = new URLSearchParams(window.location.search);
+        const taskId = params.get('task');
+        if (taskId) {
+            const el = document.querySelector(`.task-item[data-task-id="${taskId}"]`);
+            if (el) {
+                el.classList.add('active');
+                loadProperties(taskId);
+            }
+        }
+    });
+</script>
+{% endblock %}

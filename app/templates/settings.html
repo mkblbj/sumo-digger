@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <h2 class="mb-4"><i class="bi bi-gear"></i> <span data-i18n="nav.settings">设置</span></h2>
+
+        <!-- LLM API Settings -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <i class="bi bi-translate"></i> LLM Translation API
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="llmBaseUrl" class="form-label">API Base URL</label>
+                    <input type="text" class="form-control" id="llmBaseUrl" placeholder="https://your-api-server.com/v1">
+                </div>
+                <div class="mb-3">
+                    <label for="llmApiKey" class="form-label">API Key</label>
+                    <div class="input-group">
+                        <input type="password" class="form-control" id="llmApiKey" placeholder="sk-...">
+                        <button class="btn btn-outline-secondary" type="button" id="toggleKeyVisibility">
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label for="llmModel" class="form-label">Model</label>
+                    <input type="text" class="form-control" id="llmModel" placeholder="gemini-2.5-flash">
+                </div>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-primary" id="saveSettingsBtn">
+                        <i class="bi bi-check-lg"></i> Save
+                    </button>
+                    <button class="btn btn-outline-secondary" id="testConnectionBtn">
+                        <i class="bi bi-wifi"></i> Test Connection
+                    </button>
+                </div>
+                <div id="settingsStatus" class="mt-2"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const baseUrlInput = document.getElementById('llmBaseUrl');
+    const apiKeyInput = document.getElementById('llmApiKey');
+    const modelInput = document.getElementById('llmModel');
+    const statusEl = document.getElementById('settingsStatus');
+
+    // Toggle key visibility
+    document.getElementById('toggleKeyVisibility').addEventListener('click', () => {
+        const type = apiKeyInput.type === 'password' ? 'text' : 'password';
+        apiKeyInput.type = type;
+    });
+
+    // Load current settings
+    async function loadSettings() {
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            baseUrlInput.value = data.llm_base_url || '';
+            apiKeyInput.value = data.llm_api_key === '***' ? '' : data.llm_api_key;
+            apiKeyInput.placeholder = data.llm_api_key === '***' ? '(already set)' : 'sk-...';
+            modelInput.value = data.llm_model || 'gemini-2.5-flash';
+        } catch (e) {
+            console.error('Failed to load settings:', e);
+        }
+    }
+
+    // Save
+    document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+        const body = {
+            llm_base_url: baseUrlInput.value.trim(),
+            llm_model: modelInput.value.trim(),
+        };
+        // Only send key if user typed something
+        if (apiKeyInput.value && apiKeyInput.value !== '***') {
+            body.llm_api_key = apiKeyInput.value.trim();
+        }
+
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (res.ok) {
+                statusEl.innerHTML = '<div class="alert alert-success py-2">Saved!</div>';
+            } else {
+                const data = await res.json();
+                statusEl.innerHTML = `<div class="alert alert-danger py-2">${data.error}</div>`;
+            }
+        } catch (e) {
+            statusEl.innerHTML = '<div class="alert alert-danger py-2">Network error</div>';
+        }
+    });
+
+    // Test connection
+    document.getElementById('testConnectionBtn').addEventListener('click', async () => {
+        statusEl.innerHTML = '<div class="alert alert-info py-2"><span class="spinner-border spinner-border-sm"></span> Testing...</div>';
+        try {
+            const res = await fetch('/api/settings/test', { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+                statusEl.innerHTML = `<div class="alert alert-success py-2">OK: ${data.reply}</div>`;
+            } else {
+                statusEl.innerHTML = `<div class="alert alert-danger py-2">${data.error}</div>`;
+            }
+        } catch (e) {
+            statusEl.innerHTML = '<div class="alert alert-danger py-2">Network error</div>';
+        }
+    });
+
+    loadSettings();
+</script>
+{% endblock %}

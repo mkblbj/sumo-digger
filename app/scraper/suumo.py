@@ -1,9 +1,18 @@
 # -*- coding: utf-8 -*-
-"""SUUMO Property Scraping Module"""
+"""SUUMO Property Scraping Module
+
+Selectors are based on SUUMO's actual HTML as of 2026-02.
+Key structures:
+  - h1.section_h1-header-title  → property name
+  - span.property_view_note-emphasis  → rent
+  - div.property_view_note-list  → rent details + deposit/key money
+  - table tr > th + td  → ALL structured data (layout, area, access, location, etc.)
+  - img[src*="img01.suumo.com/front/gazo/fr/bukken/"]  → property images
+"""
 
 import re
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 
 import requests
@@ -24,8 +33,8 @@ class PropertyData:
     property_name: str = ""
     rent_cost: str = ""
     management_fee: str = ""
-    deposit: str = ""      # 敷金
-    key_money: str = ""    # 礼金
+    deposit: str = ""
+    key_money: str = ""
     guarantee_money: str = ""
     depreciation: str = ""
     layout: str = ""
@@ -33,17 +42,22 @@ class PropertyData:
     direction: str = ""
     building_type: str = ""
     age: str = ""
+    floor: str = ""
     access_info: List[str] = field(default_factory=list)
     location: str = ""
     features: str = ""
     table_data: Dict[str, str] = field(default_factory=dict)
+    image_urls: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for Excel export"""
-        return {
+        """Convert to dictionary for export.
+        Uses original SUUMO key names (e.g. 築年月 vs 築年数, 階建 vs 階).
+        All table_data fields are merged to ensure complete 物件概要.
+        """
+        d: Dict[str, Any] = {
             'URL': self.url,
             '物件名': self.property_name,
-            '賃料・初期費用': self.rent_cost,
+            '賃料': self.rent_cost,
             '管理費・共益費': self.management_fee,
             '敷金': self.deposit,
             '礼金': self.key_money,
@@ -53,41 +67,45 @@ class PropertyData:
             '専有面積': self.area,
             '向き': self.direction,
             '建物種別': self.building_type,
-            '築年数': self.age,
-            'アクセス1': self.access_info[0] if len(self.access_info) > 0 else 'なし',
-            'アクセス2': self.access_info[1] if len(self.access_info) > 1 else 'なし',
-            'アクセス3': self.access_info[2] if len(self.access_info) > 2 else 'なし',
-            '所在地': self.location,
-            '部屋の特徴・設備': self.features,
-            '損保': self.table_data.get('損保', '情報が見つかりません'),
-            '駐車場': self.table_data.get('駐車場', '情報が見つかりません'),
-            '仲介手数料': self.table_data.get('仲介手数料', '情報が見つかりません'),
-            '保証会社(初期)': self.table_data.get('保証会社', '情報が見つかりません'),
-            '保証会社(月々)': self.table_data.get('保証会社', '情報が見つかりません'),
-            'ほか初期費用': self.table_data.get('ほか初期費用', '情報が見つかりません'),
-            'ほか諸費用': self.table_data.get('ほか諸費用', '情報が見つかりません'),
-            '備考': self.table_data.get('備考', '情報が見つかりません'),
-            '統合': self._create_integrated_info()
         }
+        # Use original SUUMO key name for age/floor fields
+        if '築年月' in self.table_data:
+            d['築年月'] = self.age
+        else:
+            d['築年数'] = self.age
 
-    def _create_integrated_info(self) -> str:
-        """Create integrated info string"""
-        initial_cost = self.table_data.get('ほか初期費用', '情報が見つかりません')
-        other_cost = self.table_data.get('ほか諸費用', '情報が見つかりません')
-        remarks = self.table_data.get('備考', '情報が見つかりません')
-        return f"{initial_cost} | {other_cost} | {remarks}"
+        if '階建' in self.table_data:
+            d['階建'] = self.floor
+        else:
+            d['階'] = self.floor
+
+        d['アクセス1'] = self.access_info[0] if len(self.access_info) > 0 else ''
+        d['アクセス2'] = self.access_info[1] if len(self.access_info) > 1 else ''
+        d['アクセス3'] = self.access_info[2] if len(self.access_info) > 2 else ''
+        d['所在地'] = self.location
+        d['部屋の特徴・設備'] = self.features
+
+        # Merge remaining table_data (物件概要) not already covered
+        skip = {
+            '所在地', '駅徒歩', '間取り', '専有面積', '向き', '建物種別',
+            '築年数', '築年月', '階', '階建',
+        }
+        for k, v in self.table_data.items():
+            if k not in skip and k not in d:
+                d[k] = v
+        return d
 
 
 class SuumoScraper:
     """SUUMO Property Information Scraper"""
 
-    SUUMO_URL_PATTERN = re.compile(r'^https?://suumo\.jp/(?:chintai|juhan)/.*')
+    SUUMO_URL_PATTERN = re.compile(r'^https?://suumo\.jp/(?:chintai|juhan|ms|ikkodate)/.*')
 
     DEFAULT_HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
 
-    REQUEST_TIMEOUT = 10
+    REQUEST_TIMEOUT = 15
 
     def __init__(self):
         self.session = requests.Session()
@@ -95,14 +113,12 @@ class SuumoScraper:
 
     @staticmethod
     def validate_url(url: str) -> bool:
-        """Validate if URL is a SUUMO property URL"""
         if not url:
             return False
         return bool(SuumoScraper.SUUMO_URL_PATTERN.match(url))
 
     @staticmethod
     def clean_text(text: Optional[str]) -> str:
-        """Clean up whitespace and newlines from text"""
         if not text:
             return ""
         return ' '.join(text.split())
@@ -115,39 +131,46 @@ class SuumoScraper:
 
         try:
             response = self.session.get(url, timeout=self.REQUEST_TIMEOUT)
-
             if response.status_code != 200:
                 logger.error(f"HTTP error {response.status_code} for {url}")
                 return None
 
             soup = BeautifulSoup(response.content, 'html.parser')
+
+            # 1) Extract ALL table data first (most reliable source)
             table_data = self._extract_table_data(soup)
 
-            # Extract deposit and key_money separately
-            deposit, key_money = self._extract_deposit_key_money(soup)
+            # 2) Extract rent/fees from the note area
+            rent, mgmt, deposit, key_money, guarantee, depreciation = self._extract_note_area(soup)
 
-            property_data = PropertyData(
+            # 3) Extract access from table
+            access_info = self._extract_access_from_table(table_data)
+
+            # 4) Build PropertyData, using table_data as fallback
+            data = PropertyData(
                 url=url,
                 property_name=self._extract_property_name(soup),
-                rent_cost=self._extract_rent_cost(soup),
-                management_fee=self._extract_management_fee(soup),
+                rent_cost=rent,
+                management_fee=mgmt,
                 deposit=deposit,
                 key_money=key_money,
-                guarantee_money=self._extract_guarantee_money(soup),
-                depreciation=self._extract_depreciation(soup),
-                layout=self._extract_layout(soup),
-                area=self._extract_area(soup),
-                direction=self._extract_direction(soup),
-                building_type=self._extract_building_type(soup),
-                age=self._extract_age(soup),
-                access_info=self._extract_access_info(soup),
-                location=self._extract_location(soup),
+                guarantee_money=guarantee,
+                depreciation=depreciation,
+                layout=table_data.get('間取り', ''),
+                area=table_data.get('専有面積', ''),
+                direction=table_data.get('向き', ''),
+                building_type=table_data.get('建物種別', ''),
+                age=table_data.get('築年数', '') or table_data.get('築年月', ''),
+                floor=table_data.get('階', '') or table_data.get('階建', ''),
+                access_info=access_info,
+                location=table_data.get('所在地', ''),
                 features=self._extract_features(soup),
-                table_data=table_data
+                table_data=table_data,
+                image_urls=self._extract_image_urls(soup, url),
             )
 
-            logger.info(f"Successfully scraped: {url}")
-            return property_data
+            logger.info(f"Successfully scraped: {url} ({len(data.image_urls)} images)")
+            return data
 
         except requests.RequestException as e:
             logger.error(f"Request error for {url}: {e}")
@@ -156,139 +179,189 @@ class SuumoScraper:
             logger.error(f"Scraping error for {url}: {e}")
             raise SuumoScraperError(f"Scraping error: {e}")
 
+    # ── Extraction methods ──────────────────────────────────
+
     def _extract_property_name(self, soup: BeautifulSoup) -> str:
-        """Extract property name"""
         tag = soup.find('h1', class_='section_h1-header-title')
-        return self.clean_text(tag.text) if tag else '物件名が見つかりません'
+        if not tag:
+            tag = soup.find('h1')
+        return self.clean_text(tag.text) if tag else ''
 
-    def _extract_rent_cost(self, soup: BeautifulSoup) -> str:
-        """Extract rent cost"""
-        tag = soup.find('div', class_='property_view_main-emphasis')
-        return self.clean_text(tag.text) if tag else '賃料・初期費用が見つかりません'
+    def _extract_note_area(self, soup: BeautifulSoup) -> Tuple[str, str, str, str, str, str]:
+        """Parse the property_view_note area for rent, management fee, deposit, etc.
 
-    def _extract_management_fee(self, soup: BeautifulSoup) -> str:
-        """Extract management fee"""
-        tag = soup.find('div', class_='property_data-title', string='管理費・共益費')
-        if tag:
-            body_tag = tag.find_next('div', class_='property_data-body')
-            return self.clean_text(body_tag.text) if body_tag else '管理費・共益費が見つかりません'
-        return '管理費・共益費が見つかりません'
-
-    def _extract_deposit_key_money(self, soup: BeautifulSoup) -> tuple:
-        """Extract deposit and key money separately
-
-        Returns:
-            Tuple of (deposit, key_money)
+        Returns: (rent, management_fee, deposit, key_money, guarantee, depreciation)
         """
-        tag = soup.find('div', class_='property_data-title', string='敷金/礼金')
-        if tag:
-            body_tag = tag.find_next('div', class_='property_data-body')
-            if body_tag:
-                text = self.clean_text(body_tag.text)
-                # Parse "敷金 / 礼金" format (e.g., "- / 6.45万円" or "1ヶ月 / 1ヶ月")
-                if '/' in text:
-                    parts = text.split('/')
-                    deposit = parts[0].strip() if len(parts) > 0 else '-'
-                    key_money = parts[1].strip() if len(parts) > 1 else '-'
-                    return (deposit, key_money)
-                return (text, text)
-        return ('情報なし', '情報なし')
+        rent = ''
+        mgmt = ''
+        deposit = ''
+        key_money = ''
+        guarantee = ''
+        depreciation = ''
 
-    def _extract_guarantee_money(self, soup: BeautifulSoup) -> str:
-        """Extract guarantee money"""
-        tag = soup.find('div', class_='property_data-title', string='保証金')
-        if tag:
-            body_tag = tag.find_next('div', class_='property_data-body')
-            return self.clean_text(body_tag.text) if body_tag else '保証金が見つかりません'
-        return '保証金が見つかりません'
+        # Rent: span.property_view_note-emphasis
+        rent_el = soup.find('span', class_='property_view_note-emphasis')
+        if not rent_el:
+            # Fallback: old selector
+            rent_el = soup.find('div', class_='property_view_main-emphasis')
+        if rent_el:
+            rent = self.clean_text(rent_el.text)
 
-    def _extract_depreciation(self, soup: BeautifulSoup) -> str:
-        """Extract depreciation"""
-        tag = soup.find('div', class_='property_data-title', string='敷引・償却')
-        if tag:
-            body_tag = tag.find_next('div', class_='property_data-body')
-            return self.clean_text(body_tag.text) if body_tag else '敷引・償却が見つかりません'
-        return '敷引・償却が見つかりません'
+        # The note area contains two div.property_view_note-list blocks:
+        # First: "9.4万円\n管理費・共益費: 3000円"
+        # Second: "敷金: 18.8万円\n礼金: -\n保証金: -\n敷引・償却: -"
+        note_lists = soup.select('div.property_view_note-list')
 
-    def _extract_layout(self, soup: BeautifulSoup) -> str:
-        """Extract layout"""
-        tag = soup.find('div', string='間取り')
-        if tag:
-            next_tag = tag.find_next('div')
-            return self.clean_text(next_tag.text) if next_tag else '間取りが見つかりません'
-        return '間取りが見つかりません'
+        for note_list in note_lists:
+            text = note_list.get_text('\n', strip=True)
 
-    def _extract_area(self, soup: BeautifulSoup) -> str:
-        """Extract area"""
-        tag = soup.find('div', string='専有面積')
-        if tag:
-            next_tag = tag.find_next('div')
-            return self.clean_text(next_tag.text) if next_tag else '専有面積が見つかりません'
-        return '専有面積が見つかりません'
+            # Parse management fee
+            mgmt_match = re.search(r'管理費[・共益費]*[:：]\s*(.+)', text)
+            if mgmt_match:
+                mgmt = mgmt_match.group(1).strip()
 
-    def _extract_direction(self, soup: BeautifulSoup) -> str:
-        """Extract direction"""
-        tag = soup.find('div', string='向き')
-        if tag:
-            next_tag = tag.find_next('div')
-            return self.clean_text(next_tag.text) if next_tag else '向きが見つかりません'
-        return '向きが見つかりません'
+            # Parse deposit/key money/guarantee/depreciation
+            for line in text.split('\n'):
+                line = line.strip()
+                if line.startswith('敷金'):
+                    deposit = re.sub(r'^敷金[:：]\s*', '', line).strip()
+                elif line.startswith('礼金'):
+                    key_money = re.sub(r'^礼金[:：]\s*', '', line).strip()
+                elif line.startswith('保証金'):
+                    guarantee = re.sub(r'^保証金[:：]\s*', '', line).strip()
+                elif line.startswith('敷引') or line.startswith('償却'):
+                    depreciation = re.sub(r'^敷引・?償却[:：]\s*', '', line).strip()
 
-    def _extract_building_type(self, soup: BeautifulSoup) -> str:
-        """Extract building type"""
-        tag = soup.find('div', string='建物種別')
-        if tag:
-            next_tag = tag.find_next('div')
-            return self.clean_text(next_tag.text) if next_tag else '建物種別が見つかりません'
-        return '建物種別が見つかりません'
+        # Fallback: old property_data selectors
+        if not deposit and not key_money:
+            tag = soup.find('div', class_='property_data-title', string='敷金/礼金')
+            if tag:
+                body = tag.find_next('div', class_='property_data-body')
+                if body:
+                    parts = self.clean_text(body.text).split('/')
+                    deposit = parts[0].strip() if parts else ''
+                    key_money = parts[1].strip() if len(parts) > 1 else ''
 
-    def _extract_age(self, soup: BeautifulSoup) -> str:
-        """Extract age"""
-        tag = soup.find('div', string='築年数')
-        if tag:
-            next_tag = tag.find_next('div')
-            return self.clean_text(next_tag.text) if next_tag else '築年数が見つかりません'
-        return '築年数が見つかりません'
+        return (rent, mgmt, deposit, key_money, guarantee, depreciation)
 
-    def _extract_access_info(self, soup: BeautifulSoup) -> List[str]:
-        """Extract access information"""
-        tags = soup.find_all('div', class_='property_view_detail-text', limit=3)
-        return [self.clean_text(tag.text) for tag in tags]
-
-    def _extract_location(self, soup: BeautifulSoup) -> str:
-        """Extract location"""
-        container = soup.find('div', class_='property_view_detail--location')
-        if container:
-            tag = container.find('div', class_='property_view_detail-text')
-            return self.clean_text(tag.text) if tag else '所在地が見つかりません'
-        return '所在地のコンテナが見つかりません'
+    def _extract_access_from_table(self, table_data: Dict[str, str]) -> List[str]:
+        """Extract access info from table data.
+        The '駅徒歩' key contains newline-separated access lines.
+        """
+        access_text = table_data.get('駅徒歩', '')
+        if not access_text:
+            return []
+        # Split by newlines (the td content has multiple lines)
+        lines = [self.clean_text(line) for line in access_text.split('\n') if line.strip()]
+        return lines[:3]  # Max 3
 
     def _extract_features(self, soup: BeautifulSoup) -> str:
-        """Extract features"""
         tag = soup.find('div', {'id': 'bkdt-option'})
-        return tag.get_text(strip=True) if tag else '特徴・設備が見つかりません'
+        if tag:
+            # Get list items if present
+            items = tag.find_all('li')
+            if items:
+                return '、'.join(li.get_text(strip=True) for li in items)
+            return tag.get_text(strip=True)
+        return ''
+
+    # Keys from page form/nav tables that should be excluded
+    _JUNK_TABLE_KEYS = {
+        '', 'メールアドレス', '半角英数', '電話番号', 'お名前', '全国へ',
+        '賃料(管理費)', '敷/礼/保証/敷引・償却',
+    }
 
     def _extract_table_data(self, soup: BeautifulSoup) -> Dict[str, str]:
-        """Extract table data"""
-        extracted_data: Dict[str, str] = {}
+        """Extract ALL key-value pairs from property info tables on the page."""
+        data: Dict[str, str] = {}
 
-        for row in soup.select('tr'):
+        # Only look at tables within the main content area to avoid nav/form tables
+        # Try to scope to main property area first
+        main_area = soup.find('div', class_='section_h1') or soup
+
+        for row in main_area.select('tr'):
             headers = row.find_all('th')
             values = row.find_all('td')
 
             if len(headers) == 2 and len(values) >= 2:
-                key1 = headers[0].get_text(strip=True)
-                key2 = headers[1].get_text(strip=True)
-                value1 = values[0].get_text(strip=True)
-                value2 = values[1].get_text(strip=True)
-                extracted_data[key1] = value1
-                extracted_data[key2] = value2
+                k1 = headers[0].get_text(strip=True)
+                k2 = headers[1].get_text(strip=True)
+                v1 = values[0].get_text(strip=True)
+                v2 = values[1].get_text(strip=True)
+                if k1 and k1 not in self._JUNK_TABLE_KEYS:
+                    data[k1] = v1
+                if k2 and k2 not in self._JUNK_TABLE_KEYS:
+                    data[k2] = v2
             elif len(headers) == 1 and len(values) >= 1:
-                key = headers[0].get_text(strip=True)
-                if values[0].find('li'):
-                    value = ' '.join(li.get_text(strip=True) for li in values[0].find_all('li'))
+                k = headers[0].get_text(strip=True)
+                if not k or k in self._JUNK_TABLE_KEYS:
+                    continue
+                td = values[0]
+                if td.find('li'):
+                    v = ' '.join(li.get_text(strip=True) for li in td.find_all('li'))
                 else:
-                    value = values[0].get_text(strip=True)
-                extracted_data[key] = value
+                    v = td.get_text('\n', strip=True)
+                # Skip overly long values (likely form content)
+                if len(v) > 500:
+                    continue
+                data[k] = v
 
-        return extracted_data
+        return data
+
+    def _extract_image_urls(self, soup: BeautifulSoup, page_url: str = '') -> List[str]:
+        """Extract property image URLs.
+
+        Images on SUUMO follow the pattern:
+          img01.suumo.com/front/gazo/fr/bukken/{bc_suffix}/{bc_id}/{bc_id}_{type}{size}.jpg
+        Where:
+          _o.jpg = original, _t.jpg = thumbnail
+          types: g=exterior, c=layout, r=room, 1-11=photos, s1-s4=??
+
+        We want originals (_o.jpg), skip thumbnails and kaisha images.
+        """
+        urls = []
+        seen = set()
+
+        # Extract bc ID from URL for filtering
+        bc_match = re.search(r'bc[=_](\d+)', page_url)
+        bc_id = bc_match.group(1) if bc_match else ''
+
+        for img in soup.find_all('img'):
+            src = img.get('data-src') or img.get('src') or ''
+            if not src:
+                continue
+
+            # Only property images (bukken path), not kaisha (company) images
+            if '/bukken/' not in src:
+                continue
+            if 'suumo' not in src:
+                continue
+
+            # Skip thumbnails (_t.jpg), keep originals (_o.jpg)
+            if src.endswith('t.jpg') or '_t.' in src:
+                continue
+
+            # If we know the bc_id, filter for it
+            if bc_id and bc_id not in src:
+                continue
+
+            if src not in seen:
+                seen.add(src)
+                # Ensure https
+                if src.startswith('//'):
+                    src = 'https:' + src
+                urls.append(src)
+
+        # Fallback: if no originals found, try with thumbnails
+        if not urls:
+            for img in soup.find_all('img'):
+                src = img.get('data-src') or img.get('src') or ''
+                if '/bukken/' in src and 'suumo' in src and src not in seen:
+                    if bc_id and bc_id not in src:
+                        continue
+                    seen.add(src)
+                    if src.startswith('//'):
+                        src = 'https:' + src
+                    urls.append(src)
+
+        return urls

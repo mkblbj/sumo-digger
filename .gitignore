@@ -18,6 +18,7 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+instance/sumo_digger.db
 
 # Project specific
 config.txt
