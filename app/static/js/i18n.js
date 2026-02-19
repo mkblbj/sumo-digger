@@ -10,6 +10,7 @@ const i18n = {
     locale: localStorage.getItem('locale') || 'zh',
     translations: {},
     _loaded: false,
+    _changeCallbacks: [],
 
     async init() {
         await this.load(this.locale);
@@ -25,6 +26,7 @@ const i18n = {
             this._loaded = true;
             this.apply();
             this._updateToggleLabel();
+            this._changeCallbacks.forEach(fn => fn(this.locale));
         } catch (e) {
             console.error(`Failed to load i18n/${locale}.json:`, e);
         }
@@ -58,6 +60,10 @@ const i18n = {
     toggle() {
         const next = this.locale === 'zh' ? 'ja' : 'zh';
         this.load(next);
+    },
+
+    onChange(fn) {
+        this._changeCallbacks.push(fn);
     },
 
     _updateToggleLabel() {

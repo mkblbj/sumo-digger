@@ -51,8 +51,7 @@ class PropertyData:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for export.
-        Uses original SUUMO key names (e.g. 築年月 vs 築年数, 階建 vs 階).
-        All table_data fields are merged to ensure complete 物件概要.
+        Includes both basic info fields and all 物件概要 table_data fields.
         """
         d: Dict[str, Any] = {
             'URL': self.url,
@@ -67,29 +66,18 @@ class PropertyData:
             '専有面積': self.area,
             '向き': self.direction,
             '建物種別': self.building_type,
+            '築年数': self.age,
+            '階': self.floor,
+            'アクセス1': self.access_info[0] if len(self.access_info) > 0 else '',
+            'アクセス2': self.access_info[1] if len(self.access_info) > 1 else '',
+            'アクセス3': self.access_info[2] if len(self.access_info) > 2 else '',
+            '所在地': self.location,
+            '部屋の特徴・設備': self.features,
         }
-        # Use original SUUMO key name for age/floor fields
-        if '築年月' in self.table_data:
-            d['築年月'] = self.age
-        else:
-            d['築年数'] = self.age
 
-        if '階建' in self.table_data:
-            d['階建'] = self.floor
-        else:
-            d['階'] = self.floor
-
-        d['アクセス1'] = self.access_info[0] if len(self.access_info) > 0 else ''
-        d['アクセス2'] = self.access_info[1] if len(self.access_info) > 1 else ''
-        d['アクセス3'] = self.access_info[2] if len(self.access_info) > 2 else ''
-        d['所在地'] = self.location
-        d['部屋の特徴・設備'] = self.features
-
-        # Merge remaining table_data (物件概要) not already covered
-        skip = {
-            '所在地', '駅徒歩', '間取り', '専有面積', '向き', '建物種別',
-            '築年数', '築年月', '階', '階建',
-        }
+        # Merge remaining table_data (物件概要 fields etc.)
+        # Skip keys already mapped as explicit fields above
+        skip = {'所在地', '駅徒歩', '間取り', '専有面積', '向き', '建物種別', '築年数', '階'}
         for k, v in self.table_data.items():
             if k not in skip and k not in d:
                 d[k] = v
@@ -272,41 +260,67 @@ class SuumoScraper:
     }
 
     def _extract_table_data(self, soup: BeautifulSoup) -> Dict[str, str]:
-        """Extract ALL key-value pairs from property info tables on the page."""
+        """Extract ALL key-value pairs from property info tables on the page.
+
+        Scans two areas:
+          1) div.section_h1 — basic property info (所在地, 駅徒歩, 間取り, etc.)
+          2) 物件概要 table — found after the h2 heading '物件概要'
+             (this table is OUTSIDE div.section_h1 on SUUMO rental pages)
+        """
         data: Dict[str, str] = {}
 
-        # Only look at tables within the main content area to avoid nav/form tables
-        # Try to scope to main property area first
-        main_area = soup.find('div', class_='section_h1') or soup
+        # Collect target tables from both areas
+        tables_to_scan: list = []
 
-        for row in main_area.select('tr'):
-            headers = row.find_all('th')
-            values = row.find_all('td')
+        # 1) Basic info inside div.section_h1
+        main_area = soup.find('div', class_='section_h1')
+        if main_area:
+            tables_to_scan.extend(main_area.find_all('table'))
 
-            if len(headers) == 2 and len(values) >= 2:
-                k1 = headers[0].get_text(strip=True)
-                k2 = headers[1].get_text(strip=True)
-                v1 = values[0].get_text(strip=True)
-                v2 = values[1].get_text(strip=True)
-                if k1 and k1 not in self._JUNK_TABLE_KEYS:
-                    data[k1] = v1
-                if k2 and k2 not in self._JUNK_TABLE_KEYS:
-                    data[k2] = v2
-            elif len(headers) == 1 and len(values) >= 1:
-                k = headers[0].get_text(strip=True)
-                if not k or k in self._JUNK_TABLE_KEYS:
-                    continue
-                td = values[0]
-                if td.find('li'):
-                    v = ' '.join(li.get_text(strip=True) for li in td.find_all('li'))
-                else:
-                    v = td.get_text('\n', strip=True)
-                # Skip overly long values (likely form content)
-                if len(v) > 500:
-                    continue
-                data[k] = v
+        # 2) 物件概要 table (after h2 heading)
+        bukken_heading = soup.find(['h2', 'h3'], string=lambda t: t and '物件概要' in t)
+        if bukken_heading:
+            bukken_table = bukken_heading.find_next('table')
+            if bukken_table:
+                tables_to_scan.append(bukken_table)
+
+        # Fallback: if nothing found, scan the whole page
+        if not tables_to_scan:
+            tables_to_scan = soup.find_all('table')
+
+        for table in tables_to_scan:
+            for row in table.find_all('tr'):
+                self._parse_table_row(row, data)
 
         return data
+
+    def _parse_table_row(self, row, data: Dict[str, str]) -> None:
+        """Parse a single <tr> and add key-value pairs to data dict."""
+        headers = row.find_all('th')
+        values = row.find_all('td')
+
+        if len(headers) == 2 and len(values) >= 2:
+            k1 = headers[0].get_text(strip=True)
+            k2 = headers[1].get_text(strip=True)
+            v1 = values[0].get_text(strip=True)
+            v2 = values[1].get_text(strip=True)
+            if k1 and k1 not in self._JUNK_TABLE_KEYS:
+                data[k1] = v1
+            if k2 and k2 not in self._JUNK_TABLE_KEYS:
+                data[k2] = v2
+        elif len(headers) == 1 and len(values) >= 1:
+            k = headers[0].get_text(strip=True)
+            if not k or k in self._JUNK_TABLE_KEYS:
+                return
+            td = values[0]
+            if td.find('li'):
+                v = ' '.join(li.get_text(strip=True) for li in td.find_all('li'))
+            else:
+                v = td.get_text('\n', strip=True)
+            # Skip overly long values (likely form content)
+            if len(v) > 500:
+                return
+            data[k] = v
 
     def _extract_image_urls(self, soup: BeautifulSoup, page_url: str = '') -> List[str]:
         """Extract property image URLs.

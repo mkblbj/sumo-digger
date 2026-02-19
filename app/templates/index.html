@@ -2,7 +2,7 @@
 
 {% block content %}
 <div class="row justify-content-center">
-    <div class="col-lg-10">
+    <div class="col-lg-8">
         <div class="text-center mb-4">
             <h1 class="display-6 fw-bold text-primary" data-i18n="app.title">日益找房</h1>
             <p class="text-muted" data-i18n="app.subtitle">从SUUMO抓取房产信息，浏览、翻译、导出</p>
@@ -106,31 +106,39 @@
             </div>
         </div>
 
+        <!-- Batch started notification -->
+        <div class="alert alert-success mt-3 d-none" id="batchStartedCard">
+            <i class="bi bi-rocket-takeoff"></i> <strong>后台任务已启动！</strong>
+            <span id="batchStartedText"></span>
+            <a id="batchStartedLink" href="/results" class="alert-link ms-1">前往任务列表查看进度 →</a>
+        </div>
+
         <!-- Error (hidden by default) -->
         <div class="alert alert-danger mt-3 d-none" id="errorCard">
             <i class="bi bi-exclamation-triangle"></i> <span id="errorText"></span>
             <ul id="errorList" class="mb-0 mt-1 small"></ul>
         </div>
+    </div>
+</div>
 
-        <!-- ═══ Inline results section (shown after manual scrape completes) ═══ -->
-        <div class="d-none mt-4" id="inlineResults">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <h4 class="mb-0"><i class="bi bi-check-circle text-success"></i> <span id="inlineResultTitle">爬取完成</span></h4>
-                <div class="btn-group btn-group-sm">
-                    <button class="btn btn-outline-primary" id="inlineExportExcel"><i class="bi bi-file-earmark-spreadsheet"></i> Excel</button>
-                    <button class="btn btn-outline-primary" id="inlineExportCsv"><i class="bi bi-filetype-csv"></i> CSV</button>
-                    <button class="btn btn-outline-primary" id="inlineExportJson"><i class="bi bi-filetype-json"></i> JSON</button>
-                    <a class="btn btn-outline-secondary" id="inlineGoResults" href="/results"><i class="bi bi-clock-history"></i> 历史</a>
-                </div>
-            </div>
-            <div id="inlinePropertyCards"></div>
+<!-- ═══ Inline results section (full width, shown after manual scrape completes) ═══ -->
+<div class="d-none mt-4" id="inlineResults">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4 class="mb-0"><i class="bi bi-check-circle text-success"></i> <span id="inlineResultTitle">爬取完成</span></h4>
+        <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-primary" id="inlineExportExcel"><i class="bi bi-file-earmark-spreadsheet"></i> Excel</button>
+            <button class="btn btn-outline-primary" id="inlineExportCsv"><i class="bi bi-filetype-csv"></i> CSV</button>
+            <button class="btn btn-outline-primary" id="inlineExportJson"><i class="bi bi-filetype-json"></i> JSON</button>
+            <a class="btn btn-outline-secondary" id="inlineGoResults" href="/results"><i class="bi bi-clock-history"></i> 历史</a>
         </div>
     </div>
+    <div id="inlinePropertyCards"></div>
 </div>
 {% endblock %}
 
 {% block extra_js %}
 <script src="{{ url_for('static', filename='js/currency.js') }}"></script>
+<script src="{{ url_for('static', filename='js/bilingual.js') }}"></script>
 <script>
     let currentTaskId = null;
     let eventSource = null;
@@ -175,15 +183,15 @@
         } catch (e) { showError(i18n.t('error.network')); }
     });
 
-    // ── Search batch scrape ──
+    // ── Search batch scrape (fire-and-forget, runs in background) ──
     document.getElementById('startSearchScrapeBtn').addEventListener('click', async () => {
         const searchUrl = document.getElementById('searchUrlInput').value.trim();
         const maxResults = parseInt(document.getElementById('maxResultsInput').value) || 100;
         const delay = parseInt(document.getElementById('searchDelayInput').value) || 2;
         if (!searchUrl) { alert('Please enter a search URL'); return; }
 
-        scrapeMode = 'search';
-        beginProgress();
+        const btn = document.getElementById('startSearchScrapeBtn');
+        btn.disabled = true;
         try {
             const res = await fetch('/api/search/scrape', {
                 method: 'POST',
@@ -191,9 +199,12 @@
                 body: JSON.stringify({ search_url: searchUrl, max_results: maxResults, delay })
             });
             const data = await res.json();
-            if (res.ok) { currentTaskId = data.task_id; connectSSE(data.task_id); }
-            else { showError(data.error || 'Failed'); }
+            if (res.ok) {
+                // Show success toast — task runs in background
+                showBatchStarted(data.task_id, maxResults);
+            } else { showError(data.error || 'Failed'); }
         } catch (e) { showError(i18n.t('error.network')); }
+        btn.disabled = false;
     });
 
     // ── Favorites ──
@@ -291,7 +302,7 @@
     // ── Inline Results Display ──
     async function showInlineResults(taskId) {
         try {
-            const res = await fetch(`/api/properties/${taskId}`);
+            const res = await fetch(`/api/properties/${taskId}?per_page=0`);
             const data = await res.json();
             const properties = data.properties;
 
@@ -333,18 +344,11 @@
                 });
             });
 
-            // Attach toggle handlers for collapsed sections
-            container.querySelectorAll('.toggle-detail-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    const target = document.getElementById(btn.dataset.target);
-                    if (target) {
-                        target.classList.toggle('d-none');
-                        const icon = btn.querySelector('i');
-                        icon.className = target.classList.contains('d-none')
-                            ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
-                    }
-                });
-            });
+            // AI summary button handlers
+            attachAiHandlers(container);
+
+            // Auto-translate: fire translate API for each untranslated property
+            autoTranslateAll(container, properties);
 
         } catch (e) {
             console.error('Failed to load inline results:', e);
@@ -385,7 +389,7 @@
         const deposit = p['敷金'] || '-';
         const keyMoney = p['礼金'] || '-';
         const layout = p['間取り'] || '-';
-        const area = p['専有面積'] || '-';
+        const area = fmtArea(p['専有面積'] || '-');
         const access1 = p['アクセス1'] || '-';
         const location = p['所在地'] || '-';
 
@@ -423,7 +427,7 @@
         // ── 物件概要 (complete table) ──
         // Skip internal fields and already-displayed key fields
         const skipKeys = new Set([
-            '_id', '_url', '_has_translation', '_image_urls', 'URL'
+            '_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL'
         ]);
 
         // Group 1: main info (shown at top of table)
@@ -439,21 +443,31 @@
 
         for (const k of mainKeys) {
             if (p[k] !== undefined && p[k] !== '') {
-                const val = isYenField(k) ? formatPrice(String(p[k])) : escapeHtml(String(p[k]));
-                tableRows.push(`<tr><th class="text-nowrap bg-light" style="width:160px;">${escapeHtml(k)}</th><td>${val}</td></tr>`);
+                let val;
+                if (isYenField(k)) val = formatPrice(String(p[k]));
+                else if (isAreaField(k)) val = fmtArea(String(p[k]));
+                else val = escapeHtml(String(p[k]));
+                val = appendTranslation(k, val, p[k], p._translated);
+                tableRows.push(`<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${bilingualFieldName(k)}</th><td class="copy-cell">${val}</td></tr>`);
                 usedKeys.add(k);
             }
         }
 
-        // Remaining fields (物件概要 extra data from table_data)
-        const extraRows = [];
+        // Remaining fields (物件概要 extra data)
         for (const [k, v] of Object.entries(p)) {
             if (usedKeys.has(k) || v === '' || v === undefined || v === null) continue;
-            const val = isYenField(k) ? formatPrice(String(v)) : escapeHtml(String(v));
-            extraRows.push(`<tr><th class="text-nowrap bg-light" style="width:160px;">${escapeHtml(k)}</th><td>${val}</td></tr>`);
+            let val;
+            if (isYenField(k)) val = formatPrice(String(v));
+            else if (isAreaField(k)) val = fmtArea(String(v));
+            else val = escapeHtml(String(v));
+            val = appendTranslation(k, val, v, p._translated);
+            tableRows.push(`<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${bilingualFieldName(k)}</th><td class="copy-cell">${val}</td></tr>`);
         }
 
-        const detailId = `detail-extra-${idx}`;
+        // Translation status indicator
+        const transStatus = p._has_translation
+            ? '<span class="badge bg-success-subtle text-success"><i class="bi bi-check"></i> 已翻译</span>'
+            : `<span class="badge bg-light text-muted translate-status" data-idx="${idx}"><span class="spinner-border spinner-border-sm" style="width:.5rem;height:.5rem;"></span> 翻译中</span>`;
 
         return `
         <div class="card mb-4 shadow-sm">
@@ -463,6 +477,7 @@
                     <a href="${escapeHtml(url)}" target="_blank" class="ms-2 small text-decoration-none">
                         <i class="bi bi-box-arrow-up-right"></i> SUUMO
                     </a>
+                    ${transStatus}
                 </div>
                 <button class="btn btn-sm btn-outline-secondary copy-prop-btn" data-idx="${idx}">
                     <i class="bi bi-clipboard"></i> 复制
@@ -471,26 +486,82 @@
             <div class="card-body">
                 ${imageHtml}
                 ${keyInfoHtml}
-                <table class="table table-sm table-bordered mb-2">
+                <!-- AI Summary buttons -->
+                <div class="d-flex gap-2 mb-3 flex-wrap">
+                    <button class="btn btn-sm btn-outline-warning ai-title-btn" data-pid="${p._id}" data-idx="${idx}">
+                        <i class="bi bi-lightbulb"></i> AI 生成标题
+                    </button>
+                    <button class="btn btn-sm btn-outline-warning ai-summary-btn" data-pid="${p._id}" data-idx="${idx}">
+                        <i class="bi bi-file-text"></i> AI 生成简介
+                    </button>
+                </div>
+                <div class="d-none mb-3 ai-title-result" data-idx="${idx}">
+                    <div class="d-flex align-items-start gap-2">
+                        <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
+                            <small class="text-muted d-block mb-1"><i class="bi bi-lightbulb"></i> AI 标题</small>
+                            <strong class="ai-title-text user-select-all" style="cursor:pointer;"></strong>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-title" data-idx="${idx}" title="复制"><i class="bi bi-clipboard"></i></button>
+                    </div>
+                </div>
+                <div class="d-none mb-3 ai-summary-result" data-idx="${idx}">
+                    <div class="d-flex align-items-start gap-2">
+                        <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
+                            <small class="text-muted d-block mb-1"><i class="bi bi-file-text"></i> AI 简介</small>
+                            <span class="ai-summary-text user-select-all" style="cursor:pointer;"></span>
+                        </div>
+                        <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-summary" data-idx="${idx}" title="复制"><i class="bi bi-clipboard"></i></button>
+                    </div>
+                </div>
+                <table class="table table-sm table-bordered mb-0">
                     <tbody>
                         ${tableRows.join('')}
                     </tbody>
                 </table>
-                ${extraRows.length > 0 ? `
-                    <button class="btn btn-sm btn-outline-info mb-2 toggle-detail-btn" data-target="${detailId}">
-                        <i class="bi bi-chevron-down"></i> 物件概要 (${extraRows.length} 项)
-                    </button>
-                    <table class="table table-sm table-bordered d-none" id="${detailId}">
-                        <tbody>${extraRows.join('')}</tbody>
-                    </table>
-                ` : ''}
             </div>
         </div>`;
+    }
+
+    // ── Bilingual display helpers ──
+    // Fields that should never show translations (property name, addresses, stations, prices, etc.)
+    const NO_TRANSLATE_DISPLAY = new Set([
+        '物件名',
+        '所在地', '住所',
+        'アクセス1', 'アクセス2', 'アクセス3',
+        '最寄り駅1', '最寄り駅2', '最寄り駅3',
+        '駅徒歩',
+        '賃料', '賃料・初期費用', '管理費・共益費', '敷金', '礼金', '保証金', '敷引・償却',
+        '販売価格', '価格',
+        '専有面積', '土地面積', '建物面積',
+        '築年月', '築年数', '間取り', '階', '階建', '向き',
+        'URL',
+    ]);
+
+    /**
+     * Append Chinese translation below a formatted value if available.
+     * Returns the original formattedHtml if no translation or field is in no-translate set.
+     */
+    function appendTranslation(key, formattedHtml, rawOriginal, translatedData) {
+        if (!translatedData || NO_TRANSLATE_DISPLAY.has(key)) return formattedHtml;
+        const tv = translatedData[key];
+        if (!tv || String(tv) === String(rawOriginal)) return formattedHtml;
+        return `${formattedHtml}<br><small class="text-success">${escapeHtml(String(tv))}</small>`;
     }
 
     /** Check if a field name is likely a price field */
     function isYenField(key) {
         return /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費/.test(key);
+    }
+
+    /** Check if a field name is an area field */
+    function isAreaField(key) {
+        return /面積|㎡|m2/i.test(key);
+    }
+
+    /** Format m2 → m² (superscript) */
+    function fmtArea(text) {
+        if (!text) return '-';
+        return text.replace(/m2/gi, 'm²').replace(/㎡/g, 'm²');
     }
 
     function escapeHtml(text) {
@@ -500,12 +571,131 @@
     }
 
     function copyPropertyText(p) {
-        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls'];
+        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls', '_translated'];
         const text = Object.entries(p)
             .filter(([k]) => !skipKeys.includes(k))
             .map(([k, v]) => `${k}: ${v || '-'}`)
             .join('\n');
-        navigator.clipboard.writeText(text);
+        copyToClipboard(text);
+    }
+
+    function showBatchStarted(taskId, maxResults) {
+        document.getElementById('batchStartedCard').classList.remove('d-none');
+        document.getElementById('batchStartedText').textContent = `最多 ${maxResults} 条，后台爬取中...`;
+        document.getElementById('batchStartedLink').href = `/results?task=${taskId}`;
+        errorCard.classList.add('d-none');
+    }
+
+    function reattachCardHandlers(container, properties, i) {
+        const card = container.children[i];
+        if (!card) return;
+        const copyBtn = card.querySelector('.copy-prop-btn');
+        if (copyBtn) copyBtn.addEventListener('click', () => {
+            copyPropertyText(properties[i]);
+            copyBtn.innerHTML = '<i class="bi bi-check"></i> 已复制';
+            setTimeout(() => { copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> 复制'; }, 1500);
+        });
+        attachAiHandlersForCard(card);
+    }
+
+    function attachAiHandlers(container) {
+        container.querySelectorAll('.ai-title-btn').forEach(btn => {
+            btn.addEventListener('click', () => callAiSummaryCard(btn, 'title'));
+        });
+        container.querySelectorAll('.ai-summary-btn').forEach(btn => {
+            btn.addEventListener('click', () => callAiSummaryCard(btn, 'summary'));
+        });
+        container.querySelectorAll('.ai-copy-title').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const idx = btn.dataset.idx;
+                const el = btn.closest('.card')?.querySelector('.ai-title-text');
+                if (el) navigator.clipboard.writeText(el.textContent);
+            });
+        });
+        container.querySelectorAll('.ai-copy-summary').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const el = btn.closest('.card')?.querySelector('.ai-summary-text');
+                if (el) navigator.clipboard.writeText(el.textContent);
+            });
+        });
+    }
+
+    function attachAiHandlersForCard(card) {
+        card.querySelector('.ai-title-btn')?.addEventListener('click', function() { callAiSummaryCard(this, 'title'); });
+        card.querySelector('.ai-summary-btn')?.addEventListener('click', function() { callAiSummaryCard(this, 'summary'); });
+        card.querySelector('.ai-copy-title')?.addEventListener('click', function() {
+            const el = card.querySelector('.ai-title-text');
+            if (el) navigator.clipboard.writeText(el.textContent);
+        });
+        card.querySelector('.ai-copy-summary')?.addEventListener('click', function() {
+            const el = card.querySelector('.ai-summary-text');
+            if (el) navigator.clipboard.writeText(el.textContent);
+        });
+    }
+
+    async function callAiSummaryCard(btn, type) {
+        const pid = btn.dataset.pid;
+        const idx = btn.dataset.idx;
+        if (!pid) return;
+        const origHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> 生成中...`;
+        try {
+            const res = await fetch(`/api/summarize/property/${pid}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                const card = btn.closest('.card');
+                const resultEl = card.querySelector(type === 'title' ? '.ai-title-result' : '.ai-summary-result');
+                const textEl = card.querySelector(type === 'title' ? '.ai-title-text' : '.ai-summary-text');
+                if (resultEl) resultEl.classList.remove('d-none');
+                if (textEl) textEl.textContent = data.text;
+                btn.innerHTML = `<i class="bi bi-check"></i> 已生成`;
+                btn.classList.replace('btn-outline-warning', 'btn-outline-success');
+            } else {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+                alert(data.error || 'Failed');
+            }
+        } catch (e) {
+            console.error('AI summary error:', e);
+            btn.innerHTML = origHtml;
+            btn.disabled = false;
+        }
+    }
+
+    /** Auto-translate all untranslated properties sequentially */
+    async function autoTranslateAll(container, properties) {
+        for (let i = 0; i < properties.length; i++) {
+            const p = properties[i];
+            if (p._has_translation || !p._id) continue;
+            try {
+                const res = await fetch(`/api/translate/property/${p._id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force: false }),
+                });
+                const data = await res.json();
+                if (data.ok && data.property) {
+                    properties[i] = data.property;
+                    const cardEl = container.children[i];
+                    if (cardEl) {
+                        const tmp = document.createElement('div');
+                        tmp.innerHTML = buildPropertyCard(properties[i], i);
+                        cardEl.replaceWith(tmp.firstElementChild);
+                        reattachCardHandlers(container, properties, i);
+                    }
+                }
+            } catch (e) {
+                console.error(`Auto-translate property ${i} failed:`, e);
+                // Update status badge to show failure
+                const badge = container.children[i]?.querySelector('.translate-status');
+                if (badge) badge.innerHTML = '<i class="bi bi-x text-danger"></i>';
+            }
+        }
     }
 
     function showError(msg) {

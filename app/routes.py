@@ -328,9 +328,27 @@ def start_search_scrape():
 
 @api_bp.route('/tasks')
 def list_tasks():
-    """List all scraping tasks"""
-    tasks = ScrapingTask.query.order_by(ScrapingTask.created_at.desc()).limit(50).all()
-    return jsonify([t.to_dict() for t in tasks])
+    """List all scraping tasks, with live progress for running ones. Supports pagination."""
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    per_page = min(per_page, 50)  # cap
+
+    query = ScrapingTask.query.order_by(ScrapingTask.created_at.desc())
+    total = query.count()
+    tasks = query.offset((page - 1) * per_page).limit(per_page).all()
+
+    result = []
+    for t in tasks:
+        d = t.to_dict()
+        # Attach live progress from in-memory tracker if running
+        if t.id in _progress:
+            prog = _progress[t.id]
+            d['progress'] = prog['progress']
+            d['current_url'] = prog.get('current_url', '')
+            d['phase'] = prog.get('phase', '')
+            d['status'] = prog['status']
+        result.append(d)
+    return jsonify({'tasks': result, 'total': total, 'page': page, 'per_page': per_page, 'total_pages': -(-total // per_page)})
 
 
 @api_bp.route('/tasks/<task_id>', methods=['DELETE'])
@@ -347,15 +365,37 @@ def delete_task(task_id: str):
 
 @api_bp.route('/properties/<task_id>')
 def get_properties(task_id: str):
-    """Get properties for a task"""
+    """Get properties for a task. Supports pagination via page/per_page params.
+    per_page=0 returns all properties (used by inline results on index page).
+    """
     task = db.session.get(ScrapingTask, task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
 
-    properties = task.properties.all()
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+
+    query = task.properties
+    total = query.count()
+
+    if per_page <= 0:
+        # Return all (no pagination)
+        properties = query.all()
+        page = 1
+        total_pages = 1
+    else:
+        per_page = min(per_page, 200)
+        total_pages = max(1, -(-total // per_page))
+        page = min(page, total_pages)
+        properties = query.offset((page - 1) * per_page).limit(per_page).all()
+
     return jsonify({
         'task': task.to_dict(),
-        'properties': [p.to_dict(use_translated=True) for p in properties]
+        'properties': [p.to_dict(bilingual=True) for p in properties],
+        'page': page,
+        'per_page': per_page,
+        'total': total,
+        'total_pages': total_pages,
     })
 
 
@@ -478,14 +518,23 @@ def test_llm_connection():
 
 @api_bp.route('/translate/<task_id>', methods=['POST'])
 def translate_task(task_id: str):
-    """Trigger translation for a task"""
+    """Trigger translation for a task. Send force=true to clear and re-translate."""
     task = db.session.get(ScrapingTask, task_id)
     if not task:
         return jsonify({'error': 'Task not found'}), 404
 
     settings = Settings.get()
     if not settings.llm_base_url or not settings.llm_api_key:
-        return jsonify({'error': 'LLM API not configured'}), 400
+        return jsonify({'error': 'LLM API not configured. Please set up in Settings page.'}), 400
+
+    # Force re-translate: clear existing translations first
+    force = request.json.get('force', False) if request.is_json else False
+    if force:
+        properties = Property.query.filter_by(task_id=task_id).all()
+        for prop in properties:
+            prop.translated_json = None
+        db.session.commit()
+        logger.info(f"Cleared translations for task {task_id} ({len(properties)} properties)")
 
     # Run translation in background
     app = current_app._get_current_object()
@@ -493,7 +542,113 @@ def translate_task(task_id: str):
     thread.daemon = True
     thread.start()
 
-    return jsonify({'ok': True, 'message': 'Translation started'})
+    return jsonify({'ok': True, 'message': 'Translation started', 'force': force})
+
+
+@api_bp.route('/translate/property/<int:property_id>', methods=['POST'])
+def translate_single_property(property_id: int):
+    """Translate a single property synchronously and return the result."""
+    prop = db.session.get(Property, property_id)
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+
+    settings = Settings.get()
+    if not settings.llm_base_url or not settings.llm_api_key:
+        return jsonify({'error': 'LLM API not configured. Please set up in Settings page.'}), 400
+
+    force = request.json.get('force', False) if request.is_json else False
+
+    # Return cached translation if available
+    if prop.translated_json and not force:
+        return jsonify({'ok': True, 'property': prop.to_dict(bilingual=True), 'cached': True})
+
+    # Clear existing translation if forcing
+    if force:
+        prop.translated_json = None
+        db.session.commit()
+
+    try:
+        from app.services.translator import TranslatorService
+        translator = TranslatorService(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+        )
+        translated = translator.translate_property(prop.data)
+        if translated is not None:
+            prop.translated = translated
+            db.session.commit()
+        return jsonify({'ok': True, 'property': prop.to_dict(bilingual=True), 'cached': False})
+    except Exception as e:
+        logger.error(f"Single property translation error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ==================== AI Summary API ====================
+
+@api_bp.route('/summarize/property/<int:property_id>', methods=['POST'])
+def summarize_property(property_id: int):
+    """Generate AI title or short summary for a property.
+
+    Body JSON: { "type": "title" | "summary" }
+    - title: one-line Chinese title like "南堀江 准新房1LDK 南向免押金"
+    - summary: 200-300 char Chinese paragraph
+    """
+    prop = db.session.get(Property, property_id)
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+
+    settings = Settings.get()
+    if not settings.llm_base_url or not settings.llm_api_key:
+        return jsonify({'error': 'LLM API not configured'}), 400
+
+    summary_type = 'title'
+    if request.is_json:
+        summary_type = request.json.get('type', 'title')
+
+    # Build property text for LLM context
+    data = prop.data
+    skip = {'_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL', '物件画像'}
+    prop_text = '\n'.join(f'{k}: {v}' for k, v in data.items() if k not in skip and v)
+
+    if summary_type == 'title':
+        system = (
+            "你是日本房产信息编辑。根据物件信息生成一个简洁的中文标题。\n"
+            "规则：\n"
+            "- 20-40字左右，不要标点符号\n"
+            "- 包含：地区/站名 + 户型 + 核心卖点（如免押金、新房、南向等）\n"
+            "- 地名/站名保留日文\n"
+            "- 示例：南堀江 准新房1LDK 南向免押金\n"
+            "- 示例：山坂自动锁独立洗面台租房1K公寓带步入式衣橱\n"
+            "- 只输出标题文本，不要其他内容"
+        )
+    else:
+        system = (
+            "你是日本房产信息编辑。根据物件信息写一段200-300字的简体中文介绍短文。\n"
+            "规则：\n"
+            "- 涵盖：位置交通、房屋基本情况、费用、设备亮点\n"
+            "- 地名/站名保留日文原文\n"
+            "- 语气专业简洁，适合房产发布\n"
+            "- 只输出短文，不要标题或其他格式"
+        )
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
+        response = client.chat.completions.create(
+            model=settings.llm_model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prop_text},
+            ],
+            temperature=0.5,
+            max_tokens=1024,
+        )
+        text = response.choices[0].message.content.strip()
+        return jsonify({'ok': True, 'type': summary_type, 'text': text})
+    except Exception as e:
+        logger.error(f"AI summary error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 # ==================== Image API ====================
@@ -673,11 +828,6 @@ def run_scraping_task(app, task_id: str) -> None:
             prog['progress'] = len(prog['urls'])
             db.session.commit()
 
-            # Auto-translate if LLM is configured
-            settings = Settings.get()
-            if settings.llm_base_url and settings.llm_api_key:
-                run_translation_task(app, task_id)
-
         except Exception as e:
             logger.error(f"Task error: {e}")
             task.status = 'failed'
@@ -720,8 +870,12 @@ def run_translation_task(app, task_id: str) -> None:
 
                 try:
                     translated = translator.translate_property(prop.data)
-                    prop.translated = translated
-                    db.session.commit()
+                    if translated is not None:
+                        prop.translated = translated
+                        db.session.commit()
+                        logger.info(f"Property {prop.id} translated successfully")
+                    else:
+                        logger.warning(f"Property {prop.id}: translation returned None (no changes)")
                 except Exception as e:
                     logger.error(f"Translation error for property {prop.id}: {e}")
                     continue
@@ -821,11 +975,6 @@ def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int,
             prog['status'] = 'completed'
             prog['progress'] = len(urls)
             db.session.commit()
-
-            # Auto-translate
-            settings = Settings.get()
-            if settings.llm_base_url and settings.llm_api_key:
-                run_translation_task(app, task_id)
 
         except Exception as e:
             logger.error(f"Search scrape task error: {e}")

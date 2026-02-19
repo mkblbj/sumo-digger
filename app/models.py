@@ -83,9 +83,23 @@ class Property(db.Model):
     def image_urls(self, value):
         self.image_urls_json = json.dumps(value, ensure_ascii=False)
 
-    def to_dict(self, use_translated=True):
-        """Return property data, preferring translated version if available"""
-        base = self.translated if (use_translated and self.translated) else self.data
+    def to_dict(self, use_translated=True, bilingual=False):
+        """Return property data.
+
+        bilingual=True: returns original data + _translated dict for frontend dual display.
+        use_translated=True (non-bilingual): returns translated data replacing originals (for export).
+        """
+        if bilingual:
+            base = dict(self.data)
+            base['_id'] = self.id
+            base['_url'] = self.url
+            base['_has_translation'] = self.translated is not None
+            base['_image_urls'] = self.image_urls
+            if self.translated:
+                base['_translated'] = dict(self.translated)
+            return base
+
+        base = dict(self.translated) if (use_translated and self.translated) else dict(self.data)
         base['_id'] = self.id
         base['_url'] = self.url
         base['_has_translation'] = self.translated is not None

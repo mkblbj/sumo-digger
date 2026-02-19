@@ -11,7 +11,7 @@
 </head>
 <body>
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
+        <div class="container-fluid px-3 px-md-4 px-lg-5">
             <a class="navbar-brand fw-bold" href="{{ url_for('main.index') }}">
                 <i class="bi bi-buildings"></i> 日益找房 <small class="opacity-75">SUUMO Digger</small>
             </a>
@@ -35,12 +35,12 @@
         </div>
     </nav>
 
-    <main class="container py-4">
+    <main class="container-fluid px-3 px-md-4 px-lg-5 py-4">
         {% block content %}{% endblock %}
     </main>
 
     <footer class="footer mt-auto py-3 bg-light">
-        <div class="container text-center">
+        <div class="container-fluid text-center">
             <span class="text-muted" data-i18n="app.footer">日益找房 - SUUMO Digger</span>
         </div>
     </footer>

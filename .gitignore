@@ -32,3 +32,6 @@ downloads/
 dist/
 build/
 *.egg-info/
+
+# docs
+docs/

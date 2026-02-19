@@ -2,23 +2,56 @@
 
 {% block content %}
 <div class="row">
+    <!-- Left: task list -->
     <div class="col-md-3">
         <div class="card">
-            <div class="card-header">
-                <i class="bi bi-clock-history"></i> <span data-i18n="nav.results">结果浏览</span>
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-list-task"></i> <span data-i18n="results.taskList">任务列表</span></span>
+                <button class="btn btn-sm btn-outline-secondary" id="refreshTasksBtn" title="刷新">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
             </div>
-            <div class="list-group list-group-flush" id="taskList">
+            <div class="list-group list-group-flush" id="taskList" style="max-height: 60vh; overflow-y: auto;">
                 <div class="text-center py-3 text-muted" id="taskListLoading">
                     <span class="spinner-border spinner-border-sm"></span>
                 </div>
             </div>
+            <!-- Pagination -->
+            <div class="card-footer py-1 d-flex justify-content-between align-items-center" id="taskPagination">
+                <button class="btn btn-sm btn-outline-secondary" id="prevPageBtn" disabled>
+                    <i class="bi bi-chevron-left"></i>
+                </button>
+                <small class="text-muted" id="pageInfo">-</small>
+                <button class="btn btn-sm btn-outline-secondary" id="nextPageBtn" disabled>
+                    <i class="bi bi-chevron-right"></i>
+                </button>
+            </div>
         </div>
     </div>
+
+    <!-- Right: property view -->
     <div class="col-md-9">
         <div id="noSelection" class="text-center text-muted py-5">
             <i class="bi bi-arrow-left" style="font-size: 2rem;"></i>
-            <p class="mt-2">Select a task from the left</p>
+            <p class="mt-2" data-i18n="results.noSelection">从左侧选择一个任务查看</p>
         </div>
+
+        <!-- Task running indicator -->
+        <div id="taskRunningView" class="d-none">
+            <div class="card">
+                <div class="card-body text-center py-4">
+                    <div class="spinner-border text-primary mb-3" role="status"></div>
+                    <h5 id="runningTitle" data-i18n="results.taskRunning">任务运行中...</h5>
+                    <div class="progress mt-3 mx-auto" style="max-width: 400px; height: 24px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" id="runningProgressBar" style="width: 0%;">0%</div>
+                    </div>
+                    <p class="text-muted small mt-2" id="runningDetail"></p>
+                    <p class="text-muted small" id="runningPartialInfo"></p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Property view (completed tasks) -->
         <div id="propertyView" class="d-none">
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <h5 id="taskTitle" class="mb-0"></h5>
@@ -38,17 +71,39 @@
                 <table class="table table-hover table-sm" id="propertyTable">
                     <thead class="table-light">
                         <tr>
-                            <th>#</th>
-                            <th>物件名</th>
-                            <th>賃料 / 価格</th>
-                            <th>間取り</th>
-                            <th>面積</th>
-                            <th>アクセス</th>
-                            <th>操作</th>
+                            <th data-i18n="results.col.index">#</th>
+                            <th data-i18n="results.col.name">物件名</th>
+                            <th data-i18n="results.col.price">租金 / 价格</th>
+                            <th data-i18n="results.col.layout">户型</th>
+                            <th data-i18n="results.col.area">面积</th>
+                            <th data-i18n="results.col.access">交通</th>
+                            <th data-i18n="results.col.action">操作</th>
                         </tr>
                     </thead>
                     <tbody id="propertyTableBody"></tbody>
                 </table>
+            </div>
+            <!-- Property pagination -->
+            <div class="d-flex justify-content-between align-items-center mt-2" id="propertyPagination">
+                <div class="d-flex align-items-center gap-2">
+                    <small class="text-muted" data-i18n="results.perPage">每页</small>
+                    <select class="form-select form-select-sm" id="propPerPageSelect" style="width:auto;">
+                        <option value="20" selected>20</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                        <option value="200">200</option>
+                    </select>
+                    <small class="text-muted" data-i18n="results.items">条</small>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <button class="btn btn-sm btn-outline-secondary" id="propPrevBtn" disabled>
+                        <i class="bi bi-chevron-left"></i>
+                    </button>
+                    <small class="text-muted" id="propPageInfo">-</small>
+                    <button class="btn btn-sm btn-outline-secondary" id="propNextBtn" disabled>
+                        <i class="bi bi-chevron-right"></i>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -56,7 +111,7 @@
 
 <!-- Property detail modal -->
 <div class="modal fade" id="propertyModal" tabindex="-1">
-    <div class="modal-dialog modal-lg">
+    <div class="modal-dialog modal-xl">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="modalTitle"></h5>
@@ -64,10 +119,13 @@
             </div>
             <div class="modal-body" id="modalBody"></div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-outline-primary" id="modalCopyBtn">
-                    <i class="bi bi-clipboard"></i> Copy
+                <button type="button" class="btn btn-outline-info" id="modalTranslateBtn" title="翻译">
+                    <i class="bi bi-translate"></i> <span data-i18n="results.translateBtn">翻译</span>
                 </button>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-outline-primary" id="modalCopyBtn">
+                    <i class="bi bi-clipboard"></i> <span data-i18n="results.copy">复制</span>
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal"><span data-i18n="results.close">关闭</span></button>
             </div>
         </div>
     </div>
@@ -76,83 +134,230 @@
 
 {% block extra_js %}
 <script src="{{ url_for('static', filename='js/currency.js') }}"></script>
+<script src="{{ url_for('static', filename='js/bilingual.js') }}"></script>
 <script>
     let selectedTaskId = null;
     let currentProperties = [];
+    let allTasks = [];
+    let autoRefreshTimer = null;
+    let currentPage = 1;
+    let totalPages = 1;
 
-    // Load task list
-    async function loadTasks() {
+    // Property pagination state
+    let propPage = 1;
+    let propPerPage = 20;
+    let propTotalPages = 1;
+
+    /** Format m2 → m² (superscript) */
+    function fmtArea(text) {
+        if (!text) return '-';
+        return text.replace(/m2/gi, 'm²').replace(/㎡/g, 'm²');
+    }
+
+    // ── Task list ──
+    async function loadTasks(page) {
+        if (page !== undefined) currentPage = page;
         try {
-            const res = await fetch('/api/tasks');
-            const tasks = await res.json();
-            const list = document.getElementById('taskList');
-            document.getElementById('taskListLoading').remove();
-
-            if (tasks.length === 0) {
-                list.innerHTML = '<div class="text-center py-3 text-muted">No tasks yet</div>';
-                return;
-            }
-
-            list.innerHTML = tasks.map(t => {
-                const date = new Date(t.created_at).toLocaleDateString();
-                const statusBadge = t.status === 'completed'
-                    ? '<span class="badge bg-success">OK</span>'
-                    : `<span class="badge bg-secondary">${t.status}</span>`;
-                return `
-                    <a href="#" class="list-group-item list-group-item-action task-item" data-task-id="${t.id}">
-                        <div class="d-flex justify-content-between">
-                            <small>${date}</small>
-                            ${statusBadge}
-                        </div>
-                        <div>${t.result_count} / ${t.total} items</div>
-                    </a>
-                `;
-            }).join('');
-
-            // Click handler
-            list.querySelectorAll('.task-item').forEach(el => {
-                el.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    list.querySelectorAll('.task-item').forEach(i => i.classList.remove('active'));
-                    el.classList.add('active');
-                    loadProperties(el.dataset.taskId);
-                });
-            });
+            const res = await fetch(`/api/tasks?page=${currentPage}&per_page=10`);
+            const data = await res.json();
+            allTasks = data.tasks;
+            totalPages = data.total_pages;
+            renderTaskList();
+            renderPagination(data);
+            scheduleAutoRefresh();
         } catch (e) {
             console.error('Failed to load tasks:', e);
         }
     }
 
+    function renderPagination(data) {
+        const prev = document.getElementById('prevPageBtn');
+        const next = document.getElementById('nextPageBtn');
+        const info = document.getElementById('pageInfo');
+
+        prev.disabled = currentPage <= 1;
+        next.disabled = currentPage >= totalPages;
+        info.textContent = data.total > 0 ? `${currentPage} / ${totalPages}  (${data.total}${i18n.t('results.items')})` : i18n.t('results.noTasks');
+    }
+
+    document.getElementById('prevPageBtn').addEventListener('click', () => {
+        if (currentPage > 1) loadTasks(currentPage - 1);
+    });
+    document.getElementById('nextPageBtn').addEventListener('click', () => {
+        if (currentPage < totalPages) loadTasks(currentPage + 1);
+    });
+
+    function renderTaskList() {
+        const list = document.getElementById('taskList');
+        const loading = document.getElementById('taskListLoading');
+        if (loading) loading.remove();
+
+        if (allTasks.length === 0) {
+            list.innerHTML = `<div class="text-center py-3 text-muted small">${i18n.t('results.noTasks')}</div>`;
+            return;
+        }
+
+        list.innerHTML = allTasks.map(t => {
+            const date = new Date(t.created_at);
+            const timeStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+            const isRunning = ['running', 'pending', 'collecting'].includes(t.status);
+            const isSelected = t.id === selectedTaskId;
+
+            let badge = '';
+            if (t.status === 'completed') {
+                badge = `<span class="badge bg-success">${i18n.t('results.completed')}</span>`;
+            } else if (isRunning) {
+                badge = `<span class="badge bg-primary"><span class="spinner-border spinner-border-sm" style="width:.6rem;height:.6rem;"></span> ${i18n.t('results.running')}</span>`;
+            } else if (t.status === 'failed') {
+                badge = `<span class="badge bg-danger">${i18n.t('results.failed')}</span>`;
+            } else {
+                badge = `<span class="badge bg-secondary">${t.status}</span>`;
+            }
+
+            const typeLabel = t.property_type === 'search' ? '<i class="bi bi-geo-alt text-info"></i>' :
+                              t.property_type === 'buy' ? '<i class="bi bi-house text-warning"></i>' :
+                              '<i class="bi bi-link-45deg text-muted"></i>';
+
+            let progressHtml = '';
+            if (isRunning && t.total > 0) {
+                const pct = Math.round((t.progress || 0) / t.total * 100);
+                progressHtml = `<div class="progress mt-1" style="height: 4px;"><div class="progress-bar" style="width: ${pct}%;"></div></div>`;
+            } else if (isRunning) {
+                progressHtml = `<div class="progress mt-1" style="height: 4px;"><div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%;"></div></div>`;
+            }
+
+            return `
+                <div class="list-group-item list-group-item-action task-item ${isSelected ? 'active' : ''}" data-task-id="${t.id}" role="button">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div class="flex-grow-1 me-1">
+                            <div class="d-flex align-items-center gap-1">
+                                ${typeLabel}
+                                <small class="${isSelected ? 'text-white' : 'text-muted'}">${timeStr}</small>
+                                ${badge}
+                            </div>
+                            <div class="small fw-medium">${t.result_count}${t.total ? ' / ' + t.total : ''} ${i18n.t('results.property')}</div>
+                            ${progressHtml}
+                        </div>
+                        <button class="btn btn-sm ${isSelected ? 'btn-outline-light' : 'btn-outline-danger'} delete-task-btn py-0 px-1" data-task-id="${t.id}" title="${i18n.t('results.delete')}" onclick="event.stopPropagation();">
+                            <i class="bi bi-trash3" style="font-size:.7rem;"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        // Click handlers
+        list.querySelectorAll('.task-item').forEach(el => {
+            el.addEventListener('click', () => {
+                list.querySelectorAll('.task-item').forEach(i => i.classList.remove('active'));
+                el.classList.add('active');
+                selectTask(el.dataset.taskId);
+            });
+        });
+
+        // Delete handlers
+        list.querySelectorAll('.delete-task-btn').forEach(el => {
+            el.addEventListener('click', async () => {
+                const taskId = el.dataset.taskId;
+                if (!confirm(i18n.t('results.deleteConfirm'))) return;
+                try {
+                    await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+                    if (selectedTaskId === taskId) { selectedTaskId = null; hideAllViews(); }
+                    await loadTasks();
+                } catch (e) { console.error(e); }
+            });
+        });
+    }
+
+    function scheduleAutoRefresh() {
+        if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+        const hasRunning = allTasks.some(t => ['running', 'pending', 'collecting'].includes(t.status));
+        if (hasRunning) {
+            autoRefreshTimer = setInterval(async () => {
+                await loadTasks();
+                if (selectedTaskId) {
+                    const task = allTasks.find(t => t.id === selectedTaskId);
+                    if (task && ['running', 'pending', 'collecting'].includes(task.status)) {
+                        showRunningTask(task);
+                    } else if (task && task.status === 'completed') {
+                        loadProperties(selectedTaskId);
+                    }
+                }
+            }, 3000);
+        }
+    }
+
+    function selectTask(taskId) {
+        selectedTaskId = taskId;
+        propPage = 1; // Reset to first page on task switch
+        const task = allTasks.find(t => t.id === taskId);
+        if (!task) return;
+        if (['running', 'pending', 'collecting'].includes(task.status)) showRunningTask(task);
+        else loadProperties(taskId);
+    }
+
+    function hideAllViews() {
+        document.getElementById('noSelection').classList.remove('d-none');
+        document.getElementById('propertyView').classList.add('d-none');
+        document.getElementById('taskRunningView').classList.add('d-none');
+    }
+
+    function showRunningTask(task) {
+        document.getElementById('noSelection').classList.add('d-none');
+        document.getElementById('propertyView').classList.add('d-none');
+        document.getElementById('taskRunningView').classList.remove('d-none');
+
+        const pct = task.total > 0 ? Math.round((task.progress || 0) / task.total * 100) : 0;
+        const bar = document.getElementById('runningProgressBar');
+        bar.style.width = `${pct}%`;
+        bar.textContent = task.total > 0 ? `${pct}%` : '';
+        document.getElementById('runningTitle').textContent =
+            task.phase === 'collecting' ? i18n.t('results.collectingUrls') : i18n.t('results.scraping', { current: task.progress || 0, total: task.total });
+        document.getElementById('runningDetail').textContent =
+            task.current_url ? (task.current_url.length > 60 ? task.current_url.substring(0, 60) + '...' : task.current_url) : '';
+        document.getElementById('runningPartialInfo').textContent =
+            task.result_count > 0 ? i18n.t('results.gotData', { count: task.result_count }) : '';
+    }
+
+    // ── Load properties (with pagination) ──
     async function loadProperties(taskId) {
         selectedTaskId = taskId;
         document.getElementById('noSelection').classList.add('d-none');
+        document.getElementById('taskRunningView').classList.add('d-none');
         document.getElementById('propertyView').classList.remove('d-none');
 
         try {
-            const res = await fetch(`/api/properties/${taskId}`);
+            const res = await fetch(`/api/properties/${taskId}?page=${propPage}&per_page=${propPerPage}`);
             const data = await res.json();
             currentProperties = data.properties;
+            propTotalPages = data.total_pages || 1;
+            propPage = data.page || 1;
 
+            const task = data.task;
+            const date = new Date(task.created_at);
             document.getElementById('taskTitle').textContent =
-                `${data.task.result_count} items - ${new Date(data.task.created_at).toLocaleString()}`;
+                `${data.total} ${i18n.t('results.property')} - ${date.toLocaleDateString()} ${date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
+
+            // Calculate row offset for numbering
+            const rowOffset = (propPage - 1) * propPerPage;
 
             const tbody = document.getElementById('propertyTableBody');
             tbody.innerHTML = currentProperties.map((p, i) => {
                 const name = p['物件名'] || p['_url'] || '-';
                 const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
                 const layout = p['間取り'] || '-';
-                const area = p['専有面積'] || '-';
+                const area = fmtArea(p['専有面積'] || '-');
                 const access = p['アクセス1'] || '-';
                 return `
                     <tr>
-                        <td>${i + 1}</td>
+                        <td>${rowOffset + i + 1}</td>
                         <td><a href="#" class="prop-detail" data-idx="${i}">${name.substring(0, 20)}</a></td>
                         <td class="jpy-amount">${rent}</td>
                         <td>${layout}</td>
                         <td>${area}</td>
                         <td>${access.substring(0, 25)}</td>
                         <td>
-                            <button class="btn btn-sm btn-outline-secondary copy-btn" data-idx="${i}" title="Copy">
+                            <button class="btn btn-sm btn-outline-secondary copy-btn" data-idx="${i}" title="${i18n.t('results.copy')}">
                                 <i class="bi bi-clipboard"></i>
                             </button>
                         </td>
@@ -160,7 +365,6 @@
                 `;
             }).join('');
 
-            // Apply currency conversion
             if (typeof CurrencyService !== 'undefined') {
                 await CurrencyService.init();
                 document.querySelectorAll('.jpy-amount').forEach(el => {
@@ -168,40 +372,73 @@
                 });
             }
 
-            // Detail click
             tbody.querySelectorAll('.prop-detail').forEach(el => {
-                el.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    showPropertyDetail(parseInt(el.dataset.idx));
-                });
+                el.addEventListener('click', (e) => { e.preventDefault(); showPropertyDetail(parseInt(el.dataset.idx)); });
             });
-
-            // Copy click
             tbody.querySelectorAll('.copy-btn').forEach(el => {
                 el.addEventListener('click', () => copyProperty(parseInt(el.dataset.idx)));
             });
+
+            // Update property pagination
+            renderPropPagination(data);
         } catch (e) {
             console.error('Failed to load properties:', e);
         }
     }
 
-    function showPropertyDetail(idx) {
-        const p = currentProperties[idx];
-        if (!p) return;
+    function renderPropPagination(data) {
+        const prev = document.getElementById('propPrevBtn');
+        const next = document.getElementById('propNextBtn');
+        const info = document.getElementById('propPageInfo');
 
-        document.getElementById('modalTitle').textContent = p['物件名'] || 'Detail';
+        prev.disabled = propPage <= 1;
+        next.disabled = propPage >= propTotalPages;
+        info.textContent = data.total > 0
+            ? `${propPage} / ${propTotalPages}  (${data.total}${i18n.t('results.items')})`
+            : '-';
+    }
+
+    // ── Bilingual display helpers ──
+    const NO_TRANSLATE_DISPLAY = new Set([
+        '物件名',
+        '所在地', '住所',
+        'アクセス1', 'アクセス2', 'アクセス3',
+        '最寄り駅1', '最寄り駅2', '最寄り駅3',
+        '駅徒歩',
+        '賃料', '賃料・初期費用', '管理費・共益費', '敷金', '礼金', '保証金', '敷引・償却',
+        '販売価格', '価格',
+        '専有面積', '土地面積', '建物面積',
+        '築年月', '築年数', '間取り', '階', '階建', '向き',
+        'URL',
+    ]);
+
+    function appendTranslation(key, formattedHtml, rawOriginal, translatedData) {
+        if (!translatedData) return formattedHtml;
+        if (NO_TRANSLATE_DISPLAY.has(key)) return formattedHtml;
+        const tv = translatedData[key];
+        if (!tv) return formattedHtml;
+        if (String(tv) === String(rawOriginal)) return formattedHtml;
+        return `${formattedHtml}<br><small class="text-success">${escapeHtml(String(tv))}</small>`;
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // ── Property detail modal ──
+    function renderModal(p, idx) {
         const body = document.getElementById('modalBody');
-
-        const skipKeys = new Set(['_id', '_url', '_has_translation', '_image_urls', 'URL']);
+        const skipKeys = new Set(['_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL']);
         const escHtml = (t) => { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
-
         const isYenField = (k) => /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費/.test(k);
+        const isAreaField = (k) => /面積|㎡|m2/i.test(k);
         const fmtPrice = (txt) => {
             if (!txt || txt === '-' || typeof CurrencyService === 'undefined' || !CurrencyService.rate) return txt;
             return CurrencyService.format(txt);
         };
 
-        // Images
         const imageHtml = p._image_urls && p._image_urls.length > 0 ? `
             <div class="mb-3">
                 <div class="d-flex gap-2 overflow-auto pb-2" style="max-width:100%;">
@@ -213,15 +450,14 @@
                     ).join('')}
                 </div>
                 ${p._id ? `<a href="/api/image/zip/${p._id}" class="btn btn-sm btn-outline-success mt-1">
-                    <i class="bi bi-download"></i> 下载全部 ${p._image_urls.length} 张图片 (ZIP)
+                    <i class="bi bi-download"></i> ${i18n.t('results.downloadImages', { count: p._image_urls.length })}
                 </a>` : ''}
             </div>
         ` : '';
 
-        // Key info highlight
         const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
         const layout = p['間取り'] || '-';
-        const area = p['専有面積'] || '-';
+        const area = fmtArea(p['専有面積'] || '-');
         const deposit = p['敷金'] || '-';
         const keyMoney = p['礼金'] || '-';
         const location = p['所在地'] || '-';
@@ -229,90 +465,254 @@
 
         const keyInfoHtml = `
             <div class="row g-2 mb-3">
-                <div class="col-4">
-                    <div class="p-2 bg-primary bg-opacity-10 rounded text-center">
-                        <small class="text-muted d-block">賃料/価格</small>
-                        <strong class="text-primary">${fmtPrice(rent)}</strong>
-                    </div>
-                </div>
-                <div class="col-4">
-                    <div class="p-2 bg-light rounded text-center">
-                        <small class="text-muted d-block">間取り/面積</small>
-                        <strong>${escHtml(layout)} / ${escHtml(area)}</strong>
-                    </div>
-                </div>
-                <div class="col-4">
-                    <div class="p-2 bg-light rounded text-center">
-                        <small class="text-muted d-block">敷金/礼金</small>
-                        <strong>${escHtml(deposit)} / ${escHtml(keyMoney)}</strong>
-                    </div>
-                </div>
+                <div class="col-4"><div class="p-2 bg-primary bg-opacity-10 rounded text-center">
+                    <small class="text-muted d-block">賃料/価格</small>
+                    <strong class="text-primary">${fmtPrice(rent)}</strong>
+                </div></div>
+                <div class="col-4"><div class="p-2 bg-light rounded text-center">
+                    <small class="text-muted d-block">間取り/面積</small>
+                    <strong>${escHtml(layout)} / ${area}</strong>
+                </div></div>
+                <div class="col-4"><div class="p-2 bg-light rounded text-center">
+                    <small class="text-muted d-block">敷金/礼金</small>
+                    <strong>${escHtml(deposit)} / ${escHtml(keyMoney)}</strong>
+                </div></div>
             </div>
             <p class="mb-2 small text-muted">
                 <i class="bi bi-geo-alt"></i> ${escHtml(location)}
                 &nbsp;|&nbsp; <i class="bi bi-train-front"></i> ${escHtml(access1)}
             </p>`;
 
-        // Complete 物件概要 table (all fields)
         const rows = Object.entries(p)
             .filter(([k]) => !skipKeys.has(k))
             .map(([k, v]) => {
-                const val = isYenField(k) ? fmtPrice(String(v || '-')) : escHtml(String(v || '-'));
-                return `<tr><th class="text-nowrap bg-light" style="width:160px;">${escHtml(k)}</th><td>${val}</td></tr>`;
+                let val;
+                if (isYenField(k)) val = fmtPrice(String(v || '-'));
+                else if (isAreaField(k)) val = fmtArea(String(v || '-'));
+                else val = escHtml(String(v || '-'));
+                val = appendTranslation(k, val, v, p._translated);
+                return `<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${bilingualFieldName(k)}</th><td class="copy-cell">${val}</td></tr>`;
             }).join('');
 
         body.innerHTML = `
             ${imageHtml}
             ${keyInfoHtml}
-            <h6 class="border-bottom pb-1 mb-2"><i class="bi bi-list-ul"></i> 物件概要</h6>
+            <!-- AI Summary section -->
+            <div class="d-flex gap-2 mb-3 flex-wrap">
+                <button class="btn btn-sm btn-outline-warning ai-title-btn" data-pid="${p._id}">
+                    <i class="bi bi-lightbulb"></i> AI 生成标题
+                </button>
+                <button class="btn btn-sm btn-outline-warning ai-summary-btn" data-pid="${p._id}">
+                    <i class="bi bi-file-text"></i> AI 生成简介
+                </button>
+            </div>
+            <div class="d-none mb-3" id="aiTitleResult">
+                <div class="d-flex align-items-start gap-2">
+                    <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
+                        <small class="text-muted d-block mb-1"><i class="bi bi-lightbulb"></i> AI 标题</small>
+                        <strong id="aiTitleText" class="user-select-all" style="cursor:pointer;"></strong>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-btn" data-target="aiTitleText" title="复制">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="d-none mb-3" id="aiSummaryResult">
+                <div class="d-flex align-items-start gap-2">
+                    <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
+                        <small class="text-muted d-block mb-1"><i class="bi bi-file-text"></i> AI 简介</small>
+                        <span id="aiSummaryText" class="user-select-all" style="cursor:pointer;"></span>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-btn" data-target="aiSummaryText" title="复制">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="d-none alert alert-info py-1 px-2 mb-2 small" id="modalTranslateStatus">
+                <span class="spinner-border spinner-border-sm me-1"></span> ${i18n.t('results.translating')}
+            </div>
+            <h6 class="border-bottom pb-1 mb-2"><i class="bi bi-list-ul"></i> ${i18n.t('results.overview')}</h6>
             <table class="table table-sm table-bordered mb-3">${rows}</table>
             <a href="${escHtml(p._url || p.URL || '#')}" target="_blank" class="btn btn-sm btn-outline-primary">
-                <i class="bi bi-box-arrow-up-right"></i> SUUMO で見る
+                <i class="bi bi-box-arrow-up-right"></i> ${i18n.t('results.viewOnSuumo')}
             </a>
         `;
-
         document.getElementById('modalCopyBtn').onclick = () => copyProperty(idx);
-        new bootstrap.Modal(document.getElementById('propertyModal')).show();
+
+        // AI summary button handlers
+        body.querySelector('.ai-title-btn')?.addEventListener('click', (e) => callAiSummary(e.currentTarget, p._id, 'title'));
+        body.querySelector('.ai-summary-btn')?.addEventListener('click', (e) => callAiSummary(e.currentTarget, p._id, 'summary'));
+        body.querySelectorAll('.ai-copy-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const text = document.getElementById(btn.dataset.target)?.textContent;
+                if (text) { copyToClipboard(text).then(() => showCopyToast(text)); }
+            });
+        });
+    }
+
+    /**
+     * Open property detail modal.
+     * If no real translation exists, call single-property translate API synchronously.
+     */
+    async function showPropertyDetail(idx) {
+        const p = currentProperties[idx];
+        if (!p) return;
+
+        document.getElementById('modalTitle').textContent = p['物件名'] || 'Detail';
+
+        // Check if translation has real diffs
+        const hasRealTranslation = p._has_translation && p._translated && Object.entries(p).some(([k, v]) =>
+            !k.startsWith('_') && p._translated[k] && String(p._translated[k]) !== String(v)
+        );
+
+        // Render modal immediately with current data
+        renderModal(p, idx);
+        const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('propertyModal'));
+        modal.show();
+
+        // If no real translation, call API to translate this property in real-time
+        if (!hasRealTranslation && p._id) {
+            const statusEl = document.getElementById('modalTranslateStatus');
+            if (statusEl) statusEl.classList.remove('d-none');
+
+            try {
+                const res = await fetch(`/api/translate/property/${p._id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force: true }),
+                });
+                const data = await res.json();
+                if (data.ok && data.property) {
+                    // Update local data and re-render modal with translations
+                    currentProperties[idx] = data.property;
+                    renderModal(data.property, idx);
+                } else {
+                    if (statusEl) statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-warning me-1"></i> ${data.error || 'Translation unavailable'}`;
+                }
+            } catch (e) {
+                console.error('[translate] Error:', e);
+                if (statusEl) statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-danger me-1"></i> Translation failed`;
+            }
+        }
     }
 
     function copyProperty(idx) {
         const p = currentProperties[idx];
         if (!p) return;
-        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls'];
+        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls', '_translated'];
         const text = Object.entries(p)
             .filter(([k]) => !skipKeys.includes(k))
             .map(([k, v]) => `${k}: ${v || '-'}`)
             .join('\n');
-        navigator.clipboard.writeText(text).then(() => {
-            // Brief feedback
+        copyToClipboard(text).then(() => {
+            showCopyToast(p['物件名'] || 'Property');
             const btn = document.querySelector(`.copy-btn[data-idx="${idx}"]`);
-            if (btn) {
-                const orig = btn.innerHTML;
-                btn.innerHTML = '<i class="bi bi-check"></i>';
-                setTimeout(() => { btn.innerHTML = orig; }, 1000);
-            }
+            if (btn) { const o = btn.innerHTML; btn.innerHTML = '<i class="bi bi-check"></i>'; setTimeout(() => btn.innerHTML = o, 1000); }
         });
     }
 
-    // Export buttons
     ['Excel', 'Csv', 'Json'].forEach(fmt => {
         document.getElementById(`export${fmt}`).addEventListener('click', () => {
-            if (selectedTaskId) {
-                window.location.href = `/api/download/${selectedTaskId}/${fmt.toLowerCase()}`;
-            }
+            if (selectedTaskId) window.location.href = `/api/download/${selectedTaskId}/${fmt.toLowerCase()}`;
         });
     });
 
+    document.getElementById('refreshTasksBtn').addEventListener('click', () => loadTasks());
+
+    // ── Modal translate button: re-translate current property ──
+    document.getElementById('modalTranslateBtn').addEventListener('click', async () => {
+        const modalTitle = document.getElementById('modalTitle').textContent;
+        const idx = currentProperties.findIndex(p => (p['物件名'] || 'Detail') === modalTitle);
+        if (idx < 0 || !currentProperties[idx]._id) return;
+
+        const btn = document.getElementById('modalTranslateBtn');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' + i18n.t('results.translating');
+
+        try {
+            const res = await fetch(`/api/translate/property/${currentProperties[idx]._id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force: true }),
+            });
+            const data = await res.json();
+            if (data.ok && data.property) {
+                currentProperties[idx] = data.property;
+                renderModal(data.property, idx);
+            } else {
+                alert(data.error || 'Translation failed');
+            }
+        } catch (e) {
+            console.error('[translate] Error:', e);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-translate"></i> ' + i18n.t('results.translateBtn');
+        }
+    });
+
+    // ── AI Summary ──
+    async function callAiSummary(btn, propertyId, type) {
+        const origHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> 生成中...`;
+        try {
+            const res = await fetch(`/api/summarize/property/${propertyId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                const targetId = type === 'title' ? 'aiTitleResult' : 'aiSummaryResult';
+                const textId = type === 'title' ? 'aiTitleText' : 'aiSummaryText';
+                document.getElementById(targetId).classList.remove('d-none');
+                document.getElementById(textId).textContent = data.text;
+                btn.innerHTML = `<i class="bi bi-check"></i> 已生成`;
+                btn.classList.replace('btn-outline-warning', 'btn-outline-success');
+            } else {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+                alert(data.error || 'Failed');
+            }
+        } catch (e) {
+            console.error('AI summary error:', e);
+            btn.innerHTML = origHtml;
+            btn.disabled = false;
+        }
+    }
+
+    // ── Property pagination controls ──
+    document.getElementById('propPerPageSelect').addEventListener('change', (e) => {
+        propPerPage = parseInt(e.target.value);
+        propPage = 1;
+        if (selectedTaskId) loadProperties(selectedTaskId);
+    });
+    document.getElementById('propPrevBtn').addEventListener('click', () => {
+        if (propPage > 1) { propPage--; if (selectedTaskId) loadProperties(selectedTaskId); }
+    });
+    document.getElementById('propNextBtn').addEventListener('click', () => {
+        if (propPage < propTotalPages) { propPage++; if (selectedTaskId) loadProperties(selectedTaskId); }
+    });
+
+    // ── Re-render on language change ──
+    i18n.onChange(() => {
+        renderTaskList();
+        if (selectedTaskId) {
+            const task = allTasks.find(t => t.id === selectedTaskId);
+            if (task && task.status === 'completed') loadProperties(selectedTaskId);
+        }
+    });
+
+    // ── Init ──
     loadTasks().then(() => {
-        // Auto-select task from URL param (redirect from home page)
         const params = new URLSearchParams(window.location.search);
         const taskId = params.get('task');
         if (taskId) {
-            const el = document.querySelector(`.task-item[data-task-id="${taskId}"]`);
-            if (el) {
-                el.classList.add('active');
-                loadProperties(taskId);
-            }
+            selectedTaskId = taskId;
+            // Find which page this task is on — it might be page 1 if recent
+            const task = allTasks.find(t => t.id === taskId);
+            if (task) selectTask(taskId);
+            renderTaskList();
         }
     });
 </script>
