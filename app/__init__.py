@@ -39,6 +39,7 @@ def create_app(config_name: str = None) -> Flask:
     db.init_app(app)
     with app.app_context():
         db.create_all()
+        _fix_zombie_tasks(app)
 
     # Configure logging
     configure_logging(app)
@@ -48,12 +49,31 @@ def create_app(config_name: str = None) -> Flask:
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp, url_prefix='/api')
 
-    # Create download directory
+    # Create download and upload directories
     os.makedirs(app.config.get('DOWNLOAD_FOLDER', 'downloads'), exist_ok=True)
+    upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+    os.makedirs(upload_folder, exist_ok=True)
+    os.makedirs(os.path.join(upload_folder, 'floor_plans'), exist_ok=True)
 
     app.logger.info(f"Application started in {config_name} mode")
 
     return app
+
+
+def _fix_zombie_tasks(app: Flask) -> None:
+    """Mark stale running/pending tasks as failed on startup."""
+    from datetime import datetime, timezone
+    from app.models import ScrapingTask
+    zombies = ScrapingTask.query.filter(
+        ScrapingTask.status.in_(['running', 'pending', 'collecting'])
+    ).all()
+    if zombies:
+        for t in zombies:
+            t.status = 'failed'
+            t.completed_at = datetime.now(timezone.utc)
+            t.errors = [{'url': 'system', 'error': 'Task interrupted by server restart'}]
+        db.session.commit()
+        app.logger.info(f"Fixed {len(zombies)} zombie task(s) from previous run")
 
 
 def configure_logging(app: Flask) -> None:

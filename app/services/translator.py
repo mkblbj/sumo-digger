@@ -6,7 +6,7 @@ import re
 import time
 from typing import Dict, Any, Optional
 
-from openai import OpenAI
+from app.services.llm_client import LLMClient, get_llm_client, extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ _SKIP_VALUE_RE = re.compile(
 
 
 class TranslatorService:
-    """Translate property data from Japanese to Chinese using OpenAI-compatible API."""
+    """Translate property data from Japanese to Chinese using unified LLM client."""
 
     SYSTEM_PROMPT = (
         "你是日语到中文翻译器，翻译日本房产信息的描述性文本。\n"
@@ -48,9 +48,13 @@ class TranslatorService:
         "4. 不要包含 markdown 代码块标记"
     )
 
-    def __init__(self, base_url: str, api_key: str, model: str = 'gemini-2.5-flash'):
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
-        self.model = model
+    def __init__(self, base_url: str = '', api_key: str = '',
+                 model: str = 'gemini-2.5-flash', llm_client: LLMClient = None):
+        if llm_client:
+            self.llm = llm_client
+        else:
+            from app.services.llm_client import LLMClient as _LLMClient
+            self.llm = _LLMClient(base_url=base_url, api_key=api_key, model=model)
 
     def translate_property(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Translate a property data dict. Single LLM call."""
@@ -92,8 +96,7 @@ class TranslatorService:
         """Single LLM call to translate all fields."""
         user_msg = json.dumps(fields, ensure_ascii=False, indent=2)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
+        content = self.llm.chat(
             messages=[
                 {"role": "system", "content": self.SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
@@ -102,24 +105,11 @@ class TranslatorService:
             max_tokens=8192,
         )
 
-        content = response.choices[0].message.content.strip()
         logger.debug(f"LLM raw response ({len(content)} chars)")
 
-        # Strip markdown code blocks
-        if content.startswith('```'):
-            lines = content.split('\n')
-            end = len(lines)
-            for j in range(len(lines) - 1, 0, -1):
-                if lines[j].strip().startswith('```'):
-                    end = j
-                    break
-            content = '\n'.join(lines[1:end])
-
-        # Try direct parse
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            pass
+        parsed = extract_json(content)
+        if parsed is not None:
+            return parsed
 
         # Try to fix truncated JSON
         fixed = self._try_fix_json(content)

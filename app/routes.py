@@ -1,6 +1,7 @@
 """Flask routes definition"""
 
 import io
+import os
 import uuid
 import time
 import json
@@ -52,6 +53,12 @@ def index():
 def results_page():
     """Results browsing page"""
     return render_template('results.html')
+
+
+@main_bp.route('/blueprint')
+def blueprint_page():
+    """Blueprint PDF analysis page"""
+    return render_template('blueprint.html')
 
 
 @main_bp.route('/settings')
@@ -488,6 +495,8 @@ def update_settings():
         settings.llm_api_key = data['llm_api_key'].strip()
     if 'llm_model' in data:
         settings.llm_model = data['llm_model'].strip()
+    if 'llm_provider' in data:
+        settings.llm_provider = data['llm_provider'].strip()
 
     db.session.commit()
     return jsonify(settings.to_dict())
@@ -497,19 +506,17 @@ def update_settings():
 def test_llm_connection():
     """Test LLM API connection"""
     settings = Settings.get()
-    if not settings.llm_base_url or not settings.llm_api_key:
+    if not settings.llm_api_key:
         return jsonify({'error': 'LLM API not configured'}), 400
 
     try:
-        from openai import OpenAI
-        client = OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
-        response = client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[{"role": "user", "content": "テスト。「OK」とだけ返してください。"}],
-            max_tokens=10,
-        )
-        reply = response.choices[0].message.content
-        return jsonify({'ok': True, 'reply': reply})
+        from app.services.llm_client import get_llm_client
+        client = get_llm_client(settings)
+        ok, reply = client.test_connection()
+        if ok:
+            return jsonify({'ok': True, 'reply': reply, 'provider': client.provider})
+        else:
+            return jsonify({'error': reply}), 500
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -524,7 +531,7 @@ def translate_task(task_id: str):
         return jsonify({'error': 'Task not found'}), 404
 
     settings = Settings.get()
-    if not settings.llm_base_url or not settings.llm_api_key:
+    if not settings.llm_api_key:
         return jsonify({'error': 'LLM API not configured. Please set up in Settings page.'}), 400
 
     # Force re-translate: clear existing translations first
@@ -553,7 +560,7 @@ def translate_single_property(property_id: int):
         return jsonify({'error': 'Property not found'}), 404
 
     settings = Settings.get()
-    if not settings.llm_base_url or not settings.llm_api_key:
+    if not settings.llm_api_key:
         return jsonify({'error': 'LLM API not configured. Please set up in Settings page.'}), 400
 
     force = request.json.get('force', False) if request.is_json else False
@@ -569,11 +576,8 @@ def translate_single_property(property_id: int):
 
     try:
         from app.services.translator import TranslatorService
-        translator = TranslatorService(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-        )
+        from app.services.llm_client import get_llm_client
+        translator = TranslatorService(llm_client=get_llm_client(settings))
         translated = translator.translate_property(prop.data)
         if translated is not None:
             prop.translated = translated
@@ -599,7 +603,7 @@ def summarize_property(property_id: int):
         return jsonify({'error': 'Property not found'}), 404
 
     settings = Settings.get()
-    if not settings.llm_base_url or not settings.llm_api_key:
+    if not settings.llm_api_key:
         return jsonify({'error': 'LLM API not configured'}), 400
 
     summary_type = 'title'
@@ -633,22 +637,86 @@ def summarize_property(property_id: int):
         )
 
     try:
-        from openai import OpenAI
-        client = OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
-        response = client.chat.completions.create(
-            model=settings.llm_model,
+        from app.services.llm_client import get_llm_client
+        client = get_llm_client(settings)
+        text = client.chat(
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prop_text},
             ],
             temperature=0.5,
             max_tokens=1024,
-        )
-        text = response.choices[0].message.content.strip()
+        ).strip()
         return jsonify({'ok': True, 'type': summary_type, 'text': text})
     except Exception as e:
         logger.error(f"AI summary error: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ==================== Blueprint PDF API ====================
+
+@api_bp.route('/blueprint/upload', methods=['POST'])
+def upload_blueprint():
+    """Upload a blueprint PDF for analysis."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'Only PDF files are accepted'}), 400
+
+    settings = Settings.get()
+    if not settings.llm_api_key:
+        return jsonify({'error': 'LLM API not configured. Please set up in Settings page.'}), 400
+
+    pdf_bytes = file.read()
+    if len(pdf_bytes) > current_app.config.get('MAX_CONTENT_LENGTH', 50 * 1024 * 1024):
+        return jsonify({'error': 'File too large (max 50MB)'}), 400
+
+    task_id = str(uuid.uuid4())
+    task = ScrapingTask(
+        id=task_id,
+        status='pending',
+        property_type='blueprint',
+        total=0,
+    )
+    db.session.add(task)
+    db.session.commit()
+
+    with _progress_lock:
+        _progress[task_id] = {
+            'status': 'pending',
+            'phase': 'uploading',
+            'progress': 0,
+            'total': 0,
+            'current_url': file.filename,
+            'errors': [],
+            'urls': [],
+            'delay': 0,
+        }
+
+    app = current_app._get_current_object()
+    thread = threading.Thread(
+        target=run_blueprint_task,
+        args=(app, task_id, pdf_bytes, file.filename)
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'task_id': task_id, 'filename': file.filename})
+
+
+@api_bp.route('/blueprint/floor_plan/<path:filename>')
+def serve_floor_plan(filename):
+    """Serve a floor plan image."""
+    upload_folder = current_app.config.get('UPLOAD_FOLDER', 'uploads')
+    floor_plan_dir = os.path.join(upload_folder, 'floor_plans')
+    filepath = os.path.join(floor_plan_dir, filename)
+
+    if not os.path.isfile(filepath):
+        return jsonify({'error': 'Floor plan not found'}), 404
+
+    return send_file(filepath)
 
 
 # ==================== Image API ====================
@@ -852,16 +920,13 @@ def run_translation_task(app, task_id: str) -> None:
     """Run translation in background thread"""
     with app.app_context():
         settings = Settings.get()
-        if not settings.llm_base_url or not settings.llm_api_key:
+        if not settings.llm_api_key:
             return
 
         try:
             from app.services.translator import TranslatorService
-            translator = TranslatorService(
-                base_url=settings.llm_base_url,
-                api_key=settings.llm_api_key,
-                model=settings.llm_model,
-            )
+            from app.services.llm_client import get_llm_client
+            translator = TranslatorService(llm_client=get_llm_client(settings))
 
             properties = Property.query.filter_by(task_id=task_id).all()
             for prop in properties:
@@ -985,6 +1050,87 @@ def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int,
         finally:
             task.completed_at = datetime.now(timezone.utc)
             db.session.commit()
+            prog['current_url'] = ''
+
+            def cleanup():
+                time.sleep(30)
+                with _progress_lock:
+                    _progress.pop(task_id, None)
+            threading.Thread(target=cleanup, daemon=True).start()
+
+
+def run_blueprint_task(app, task_id: str, pdf_bytes: bytes, filename: str) -> None:
+    """Analyze a blueprint PDF in a background thread."""
+    with app.app_context():
+        prog = _progress.get(task_id)
+        if not prog:
+            return
+
+        task = db.session.get(ScrapingTask, task_id)
+        if not task:
+            return
+
+        task.status = 'running'
+        prog['status'] = 'running'
+        prog['phase'] = 'analyzing'
+        db.session.commit()
+
+        try:
+            from app.services.llm_client import get_llm_client
+            from app.services.pdf_analyzer import BlueprintAnalyzer
+
+            settings = Settings.get()
+            llm_client = get_llm_client(settings)
+            upload_folder = app.config.get('UPLOAD_FOLDER', 'uploads')
+            analyzer = BlueprintAnalyzer(llm_client, upload_folder)
+
+            def on_progress(current, total, message):
+                prog['progress'] = current
+                prog['total'] = total
+                prog['current_url'] = message
+                task.total = total
+                try:
+                    db.session.commit()
+                except Exception:
+                    pass
+
+            properties = analyzer.analyze_pdf(pdf_bytes, filename, progress_cb=on_progress)
+
+            for prop in properties:
+                data = BlueprintAnalyzer.property_to_dict(prop)
+                db_prop = Property(
+                    task_id=task_id,
+                    url=f'blueprint://{filename}',
+                )
+                db_prop.data = data
+                floor_plan_urls = [
+                    f'/api/blueprint/floor_plan/{os.path.basename(p)}'
+                    for p in prop.floor_plan_paths
+                ]
+                db_prop.image_urls = floor_plan_urls
+                db.session.add(db_prop)
+
+            task.status = 'completed'
+            task.total = len(properties)
+            task.completed_at = datetime.now(timezone.utc)
+            task.errors = prog['errors']
+            prog['status'] = 'completed'
+            prog['progress'] = len(properties)
+            prog['total'] = len(properties)
+            db.session.commit()
+
+            logger.info(f"Blueprint task {task_id} completed: {len(properties)} properties from {filename}")
+
+        except Exception as e:
+            logger.error(f"Blueprint task error: {e}", exc_info=True)
+            task.status = 'failed'
+            task.errors = [{'url': filename, 'error': str(e)}]
+            task.completed_at = datetime.now(timezone.utc)
+            prog['status'] = 'error'
+            prog['errors'].append({'url': filename, 'error': str(e)})
+            db.session.commit()
+
+        finally:
             prog['current_url'] = ''
 
             def cleanup():

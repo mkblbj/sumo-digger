@@ -13,8 +13,14 @@ requests>=2.31.0
 selenium>=4.15.0
 webdriver-manager>=4.0.0
 
-# LLM Translation (OpenAI-compatible API)
+# LLM (OpenAI + Gemini native SDK)
 openai>=1.0.0
+google-genai>=1.0.0
+
+# PDF Processing & Image
+PyMuPDF>=1.24.0
+pdf2image>=1.17.0
+Pillow>=10.0.0
 
 # Testing
 pytest>=7.0.0

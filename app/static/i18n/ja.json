@@ -88,5 +88,27 @@
   "results.translating": "翻訳中...",
   "results.translatingDone": "翻訳完了",
   "results.translateBtn": "翻訳",
-  "results.clickToCopy": "クリックしてコピー"
+  "results.clickToCopy": "クリックしてコピー",
+
+  "nav.blueprint": "図面分析",
+  "blueprint.title": "不動産図面PDF分析",
+  "blueprint.subtitle": "不動産図面PDFをアップロードし、物件情報を自動抽出",
+  "blueprint.upload": "PDFファイルをアップロード",
+  "blueprint.dropHint": "PDFファイルをドラッグ＆ドロップ、またはクリックして選択",
+  "blueprint.maxSize": "最大50MB、PDF形式のみ",
+  "blueprint.startAnalysis": "分析開始",
+  "blueprint.analyzing": "分析中...",
+  "blueprint.page": "ページ",
+  "blueprint.properties": "抽出した物件",
+  "blueprint.noProperties": "物件情報が見つかりません",
+  "blueprint.floorPlan": "間取り図",
+  "blueprint.pageImages": "ページ画像",
+  "blueprint.propertyType": "物件種別",
+  "blueprint.export": "エクスポート",
+  "blueprint.newUpload": "新しい分析",
+  "blueprint.types.rental": "賃貸",
+  "blueprint.types.mansion": "マンション",
+  "blueprint.types.house": "一戸建",
+  "blueprint.types.investment": "投資",
+  "blueprint.types.land": "土地"
 }

@@ -23,6 +23,7 @@ instance/sumo_digger.db
 # Project specific
 config.txt
 downloads/
+uploads/
 *.local.json
 
 # Logs

@@ -22,6 +22,13 @@ class Config:
     MAX_URLS = int(os.environ.get('MAX_URLS', 100))
     REQUEST_DELAY = int(os.environ.get('REQUEST_DELAY', 2))
 
+    # Blueprint PDF upload
+    UPLOAD_FOLDER = os.environ.get(
+        'UPLOAD_FOLDER',
+        os.path.join(os.path.abspath(os.path.dirname(__file__)), 'uploads')
+    )
+    MAX_CONTENT_LENGTH = int(os.environ.get('MAX_CONTENT_LENGTH', 50 * 1024 * 1024))  # 50MB
+
     # Logging
     LOG_LEVEL = logging.INFO
 

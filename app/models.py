@@ -115,6 +115,7 @@ class Settings(db.Model):
     llm_base_url = db.Column(db.String(500), default='')
     llm_api_key = db.Column(db.String(500), default='')
     llm_model = db.Column(db.String(100), default='gemini-2.5-flash')
+    llm_provider = db.Column(db.String(20), default='auto')  # auto/gemini/openai/compatible
 
     @classmethod
     def get(cls):
@@ -129,7 +130,8 @@ class Settings(db.Model):
     def to_dict(self):
         return {
             'llm_base_url': self.llm_base_url or '',
-            'llm_api_key': '***' if self.llm_api_key else '',  # mask key
+            'llm_api_key': '***' if self.llm_api_key else '',
             'llm_model': self.llm_model or 'gemini-2.5-flash',
+            'llm_provider': self.llm_provider or 'auto',
             'llm_configured': bool(self.llm_base_url and self.llm_api_key),
         }

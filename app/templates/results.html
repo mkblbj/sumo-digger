@@ -216,6 +216,7 @@
 
             const typeLabel = t.property_type === 'search' ? '<i class="bi bi-geo-alt text-info"></i>' :
                               t.property_type === 'buy' ? '<i class="bi bi-house text-warning"></i>' :
+                              t.property_type === 'blueprint' ? '<i class="bi bi-file-earmark-pdf text-danger"></i>' :
                               '<i class="bi bi-link-45deg text-muted"></i>';
 
             let progressHtml = '';
@@ -344,14 +345,22 @@
             const tbody = document.getElementById('propertyTableBody');
             tbody.innerHTML = currentProperties.map((p, i) => {
                 const name = p['物件名'] || p['_url'] || '-';
-                const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
+                const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || p['価格'] || '-';
                 const layout = p['間取り'] || '-';
-                const area = fmtArea(p['専有面積'] || '-');
-                const access = p['アクセス1'] || '-';
+                const area = fmtArea(p['専有面積'] || p['面積'] || p['土地面積'] || '-');
+                const access = p['アクセス1'] || p['交通'] || '-';
+                const hasImages = p._image_urls && p._image_urls.length > 0;
+                const isBlueprint = p._source === 'blueprint';
+                const thumbUrl = hasImages ? (isBlueprint || p._image_urls[0].startsWith('/') ? p._image_urls[0] : `/api/image/proxy?url=${encodeURIComponent(p._image_urls[0])}`) : '';
                 return `
                     <tr>
                         <td>${rowOffset + i + 1}</td>
-                        <td><a href="#" class="prop-detail" data-idx="${i}">${name.substring(0, 20)}</a></td>
+                        <td>
+                            <div class="d-flex align-items-center gap-2">
+                                ${hasImages ? `<img src="${thumbUrl}" style="height:32px;width:32px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" loading="lazy">` : ''}
+                                <a href="#" class="prop-detail" data-idx="${i}">${name.substring(0, 20)}</a>
+                            </div>
+                        </td>
                         <td class="jpy-amount">${rent}</td>
                         <td>${layout}</td>
                         <td>${area}</td>
@@ -430,7 +439,8 @@
     // ── Property detail modal ──
     function renderModal(p, idx) {
         const body = document.getElementById('modalBody');
-        const skipKeys = new Set(['_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL']);
+        const isBlueprint = p._source === 'blueprint';
+        const skipKeys = new Set(['_id', '_url', '_has_translation', '_image_urls', '_translated', '_source', '_property_type', '_floor_plan_paths', 'URL']);
         const escHtml = (t) => { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
         const isYenField = (k) => /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費/.test(k);
         const isAreaField = (k) => /面積|㎡|m2/i.test(k);
@@ -442,26 +452,28 @@
         const imageHtml = p._image_urls && p._image_urls.length > 0 ? `
             <div class="mb-3">
                 <div class="d-flex gap-2 overflow-auto pb-2" style="max-width:100%;">
-                    ${p._image_urls.slice(0, 20).map((url, i) =>
-                        `<img src="/api/image/proxy?url=${encodeURIComponent(url)}" class="rounded shadow-sm flex-shrink-0"
+                    ${p._image_urls.slice(0, 20).map((url, i) => {
+                        const imgSrc = isBlueprint || url.startsWith('/') ? url : `/api/image/proxy?url=${encodeURIComponent(url)}`;
+                        const fullSrc = isBlueprint || url.startsWith('/') ? url : `/api/image/proxy?url=${encodeURIComponent(url)}`;
+                        return `<img src="${imgSrc}" class="rounded shadow-sm flex-shrink-0"
                               style="height:150px; cursor:pointer; object-fit:cover;"
-                              onclick="window.open('/api/image/proxy?url=${encodeURIComponent(url)}','_blank')"
-                              onerror="this.style.display='none'" title="Image ${i+1}" loading="lazy">`
-                    ).join('')}
+                              onclick="window.open('${fullSrc}','_blank')"
+                              onerror="this.style.display='none'" title="Image ${i+1}" loading="lazy">`;
+                    }).join('')}
                 </div>
-                ${p._id ? `<a href="/api/image/zip/${p._id}" class="btn btn-sm btn-outline-success mt-1">
+                ${p._id && !isBlueprint ? `<a href="/api/image/zip/${p._id}" class="btn btn-sm btn-outline-success mt-1">
                     <i class="bi bi-download"></i> ${i18n.t('results.downloadImages', { count: p._image_urls.length })}
                 </a>` : ''}
             </div>
         ` : '';
 
-        const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
+        const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || p['価格'] || '-';
         const layout = p['間取り'] || '-';
-        const area = fmtArea(p['専有面積'] || '-');
+        const area = fmtArea(p['専有面積'] || p['面積'] || p['土地面積'] || '-');
         const deposit = p['敷金'] || '-';
         const keyMoney = p['礼金'] || '-';
-        const location = p['所在地'] || '-';
-        const access1 = p['アクセス1'] || '-';
+        const location = p['所在地'] || p['住所'] || '-';
+        const access1 = p['アクセス1'] || p['交通'] || '-';
 
         const keyInfoHtml = `
             <div class="row g-2 mb-3">
@@ -533,9 +545,9 @@
             </div>
             <h6 class="border-bottom pb-1 mb-2"><i class="bi bi-list-ul"></i> ${i18n.t('results.overview')}</h6>
             <table class="table table-sm table-bordered mb-3">${rows}</table>
-            <a href="${escHtml(p._url || p.URL || '#')}" target="_blank" class="btn btn-sm btn-outline-primary">
+            ${!isBlueprint ? `<a href="${escHtml(p._url || p.URL || '#')}" target="_blank" class="btn btn-sm btn-outline-primary">
                 <i class="bi bi-box-arrow-up-right"></i> ${i18n.t('results.viewOnSuumo')}
-            </a>
+            </a>` : ''}
         `;
         document.getElementById('modalCopyBtn').onclick = () => copyProperty(idx);
 

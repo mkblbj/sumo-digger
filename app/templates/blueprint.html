@@ -1,0 +1,408 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-10">
+        <div class="text-center mb-4">
+            <h1 class="display-6 fw-bold text-primary">
+                <i class="bi bi-file-earmark-pdf"></i>
+                <span data-i18n="blueprint.title">不动产图纸PDF分析</span>
+            </h1>
+            <p class="text-muted" data-i18n="blueprint.subtitle">上传不动产图纸PDF，自动识别提取物件信息</p>
+        </div>
+
+        <!-- Upload Section -->
+        <div id="uploadSection">
+            <div class="card mb-4">
+                <div class="card-body p-4">
+                    <div id="dropZone" class="border border-2 border-dashed rounded-3 p-5 text-center"
+                         style="cursor:pointer; transition: all 0.2s;">
+                        <i class="bi bi-cloud-arrow-up display-3 text-primary mb-3 d-block"></i>
+                        <p class="fs-5 mb-1" data-i18n="blueprint.dropHint">拖拽PDF文件到此处，或点击选择文件</p>
+                        <small class="text-muted" data-i18n="blueprint.maxSize">最大50MB，仅支持PDF格式</small>
+                        <input type="file" id="fileInput" accept=".pdf" class="d-none">
+                    </div>
+                    <div id="fileInfo" class="d-none mt-3">
+                        <div class="d-flex align-items-center gap-3 p-3 bg-light rounded">
+                            <i class="bi bi-file-earmark-pdf fs-2 text-danger"></i>
+                            <div class="flex-grow-1">
+                                <div id="fileName" class="fw-bold"></div>
+                                <small id="fileSize" class="text-muted"></small>
+                            </div>
+                            <button class="btn btn-sm btn-outline-danger" id="removeFile">
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary w-100 btn-lg mt-3" id="startAnalysisBtn" disabled>
+                        <i class="bi bi-cpu"></i> <span data-i18n="blueprint.startAnalysis">开始分析</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div id="progressSection" class="d-none">
+            <div class="card mb-4">
+                <div class="card-body">
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <div class="spinner-border text-primary" id="progressSpinner"></div>
+                        <div class="flex-grow-1">
+                            <div id="progressMessage" class="fw-bold" data-i18n="blueprint.analyzing">分析中...</div>
+                            <small id="progressDetail" class="text-muted"></small>
+                        </div>
+                    </div>
+                    <div class="progress" style="height: 6px;">
+                        <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated"
+                             style="width: 0%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultsSection" class="d-none">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="mb-0">
+                    <i class="bi bi-table"></i>
+                    <span data-i18n="blueprint.properties">提取的物件</span>
+                    <span id="resultCount" class="badge bg-primary ms-2">0</span>
+                </h4>
+                <div class="d-flex gap-2">
+                    <div class="dropdown">
+                        <button class="btn btn-success dropdown-toggle" data-bs-toggle="dropdown">
+                            <i class="bi bi-download"></i> <span data-i18n="blueprint.export">导出</span>
+                        </button>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item export-btn" data-format="excel" href="#">
+                                <i class="bi bi-file-earmark-excel"></i> Excel
+                            </a></li>
+                            <li><a class="dropdown-item export-btn" data-format="csv" href="#">
+                                <i class="bi bi-filetype-csv"></i> CSV
+                            </a></li>
+                            <li><a class="dropdown-item export-btn" data-format="json" href="#">
+                                <i class="bi bi-filetype-json"></i> JSON
+                            </a></li>
+                        </ul>
+                    </div>
+                    <a class="btn btn-outline-info" id="viewInResultsBtn" href="/results">
+                        <i class="bi bi-table"></i> <span data-i18n="nav.results">结果浏览</span>
+                    </a>
+                    <button class="btn btn-outline-primary" id="newUploadBtn">
+                        <i class="bi bi-plus-lg"></i> <span data-i18n="blueprint.newUpload">新建分析</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="propertiesContainer"></div>
+        </div>
+
+        <!-- Error Section -->
+        <div id="errorSection" class="d-none">
+            <div class="alert alert-danger d-flex align-items-center gap-3">
+                <i class="bi bi-exclamation-triangle-fill fs-3"></i>
+                <div>
+                    <strong data-i18n="error.title">错误</strong>
+                    <div id="errorMessage"></div>
+                </div>
+            </div>
+            <button class="btn btn-outline-primary" id="retryBtn">
+                <i class="bi bi-arrow-clockwise"></i> <span data-i18n="blueprint.newUpload">重试</span>
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileInfo = document.getElementById('fileInfo');
+const fileName = document.getElementById('fileName');
+const fileSize = document.getElementById('fileSize');
+const startBtn = document.getElementById('startAnalysisBtn');
+const removeBtn = document.getElementById('removeFile');
+
+const uploadSection = document.getElementById('uploadSection');
+const progressSection = document.getElementById('progressSection');
+const resultsSection = document.getElementById('resultsSection');
+const errorSection = document.getElementById('errorSection');
+
+let selectedFile = null;
+let currentTaskId = null;
+
+// ============= File Selection =============
+
+dropZone.addEventListener('click', () => fileInput.click());
+
+dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('border-primary', 'bg-primary', 'bg-opacity-10');
+});
+
+dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('border-primary', 'bg-primary', 'bg-opacity-10');
+});
+
+dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('border-primary', 'bg-primary', 'bg-opacity-10');
+    const files = e.dataTransfer.files;
+    if (files.length > 0 && files[0].name.toLowerCase().endsWith('.pdf')) {
+        selectFile(files[0]);
+    }
+});
+
+fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) {
+        selectFile(fileInput.files[0]);
+    }
+});
+
+removeBtn.addEventListener('click', () => {
+    selectedFile = null;
+    fileInfo.classList.add('d-none');
+    startBtn.disabled = true;
+    fileInput.value = '';
+});
+
+function selectFile(file) {
+    selectedFile = file;
+    fileName.textContent = file.name;
+    fileSize.textContent = formatFileSize(file.size);
+    fileInfo.classList.remove('d-none');
+    startBtn.disabled = false;
+}
+
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+// ============= Upload & Analysis =============
+
+startBtn.addEventListener('click', startAnalysis);
+
+async function startAnalysis() {
+    if (!selectedFile) return;
+
+    showSection('progress');
+
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+
+    try {
+        const res = await fetch('/api/blueprint/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (!res.ok) {
+            showError(data.error || 'Upload failed');
+            return;
+        }
+
+        currentTaskId = data.task_id;
+        pollProgress(currentTaskId);
+    } catch (e) {
+        showError('Network error: ' + e.message);
+    }
+}
+
+function pollProgress(taskId) {
+    const evtSource = new EventSource(`/api/scrape/stream/${taskId}`);
+
+    evtSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'progress') {
+            updateProgress(data);
+
+            if (data.status === 'completed') {
+                evtSource.close();
+                loadResults(taskId);
+            } else if (data.status === 'error') {
+                evtSource.close();
+                const errMsg = data.errors && data.errors.length > 0
+                    ? data.errors[data.errors.length - 1].error
+                    : 'Analysis failed';
+                showError(errMsg);
+            }
+        } else if (data.type === 'error') {
+            evtSource.close();
+            showError(data.message || 'Stream error');
+        }
+    };
+
+    evtSource.onerror = () => {
+        evtSource.close();
+        setTimeout(() => checkFinalStatus(taskId), 1000);
+    };
+}
+
+async function checkFinalStatus(taskId) {
+    try {
+        const res = await fetch(`/api/scrape/status/${taskId}`);
+        const data = await res.json();
+        if (data.status === 'completed') {
+            loadResults(taskId);
+        } else if (data.status === 'failed' || data.status === 'error') {
+            showError(data.errors?.[0]?.error || 'Analysis failed');
+        } else {
+            setTimeout(() => pollProgress(taskId), 2000);
+        }
+    } catch (e) {
+        showError('Connection lost');
+    }
+}
+
+function updateProgress(data) {
+    const pct = data.total > 0 ? Math.round((data.progress / data.total) * 100) : 0;
+    document.getElementById('progressBar').style.width = pct + '%';
+    document.getElementById('progressDetail').textContent =
+        data.current_url || `${data.progress}/${data.total}`;
+}
+
+// ============= Results Display =============
+
+async function loadResults(taskId) {
+    try {
+        const res = await fetch(`/api/properties/${taskId}?per_page=0`);
+        const data = await res.json();
+
+        if (!res.ok) {
+            showError(data.error || 'Failed to load results');
+            return;
+        }
+
+        renderResults(data.properties);
+        document.getElementById('viewInResultsBtn').href = `/results?task=${taskId}`;
+        showSection('results');
+    } catch (e) {
+        showError('Failed to load results: ' + e.message);
+    }
+}
+
+const TYPE_LABELS = {
+    rental: { zh: '租赁', ja: '賃貸', color: 'primary' },
+    mansion: { zh: '公寓', ja: 'マンション', color: 'info' },
+    house: { zh: '一户建', ja: '一戸建', color: 'success' },
+    investment: { zh: '投资', ja: '投資', color: 'warning' },
+    land: { zh: '土地', ja: '土地', color: 'secondary' },
+};
+
+function renderResults(properties) {
+    const container = document.getElementById('propertiesContainer');
+    document.getElementById('resultCount').textContent = properties.length;
+
+    if (!properties.length) {
+        container.innerHTML = `<div class="alert alert-warning text-center">
+            <i class="bi bi-info-circle"></i>
+            <span data-i18n="blueprint.noProperties">未提取到物件信息</span>
+        </div>`;
+        i18n.apply();
+        return;
+    }
+
+    container.innerHTML = properties.map((prop, idx) => {
+        const type = prop._property_type || 'rental';
+        const typeInfo = TYPE_LABELS[type] || TYPE_LABELS.rental;
+        const name = prop['物件名'] || `物件 ${idx + 1}`;
+        const floorPlans = prop._image_urls || [];
+
+        const skip = new Set(['物件名', '_id', '_url', '_has_translation', '_image_urls',
+                              '_translated', '_property_type', '_source', '_floor_plan_paths']);
+        const fields = Object.entries(prop).filter(([k]) => !skip.has(k) && prop[k]);
+
+        return `
+        <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <span class="badge bg-${typeInfo.color} me-2">${typeInfo.zh}</span>
+                    <strong>${escapeHtml(name)}</strong>
+                </div>
+                <small class="text-muted">#${idx + 1}</small>
+            </div>
+            <div class="card-body">
+                ${floorPlans.length ? `
+                <div class="mb-3">
+                    <small class="text-muted d-block mb-2"><i class="bi bi-image"></i> <span data-i18n="blueprint.pageImages">页面截图</span> (${floorPlans.length})</small>
+                    <div class="d-flex gap-2 overflow-auto pb-2">
+                        ${floorPlans.map(url => `
+                        <img src="${url}" class="rounded border shadow-sm flex-shrink-0"
+                             style="height:200px; cursor:pointer; object-fit:contain;"
+                             onclick="window.open('${url}', '_blank')"
+                             onerror="this.style.display='none'"
+                             loading="lazy">
+                        `).join('')}
+                    </div>
+                </div>` : ''}
+                <table class="table table-sm table-striped mb-0">
+                    <tbody>
+                        ${fields.map(([k, v]) => `
+                        <tr>
+                            <td class="text-nowrap fw-medium" style="width:140px">${escapeHtml(k)}</td>
+                            <td>${escapeHtml(String(v))}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>`;
+    }).join('');
+
+    i18n.apply();
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// ============= Export =============
+
+document.querySelectorAll('.export-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!currentTaskId) return;
+        const format = btn.dataset.format;
+        window.location.href = `/api/download/${currentTaskId}/${format}`;
+    });
+});
+
+// ============= Section Management =============
+
+function showSection(section) {
+    uploadSection.classList.add('d-none');
+    progressSection.classList.add('d-none');
+    resultsSection.classList.add('d-none');
+    errorSection.classList.add('d-none');
+
+    switch (section) {
+        case 'upload': uploadSection.classList.remove('d-none'); break;
+        case 'progress': progressSection.classList.remove('d-none'); break;
+        case 'results': resultsSection.classList.remove('d-none'); break;
+        case 'error': errorSection.classList.remove('d-none'); break;
+    }
+}
+
+function showError(msg) {
+    document.getElementById('errorMessage').textContent = msg;
+    showSection('error');
+}
+
+document.getElementById('newUploadBtn').addEventListener('click', resetPage);
+document.getElementById('retryBtn').addEventListener('click', resetPage);
+
+function resetPage() {
+    selectedFile = null;
+    currentTaskId = null;
+    fileInput.value = '';
+    fileInfo.classList.add('d-none');
+    startBtn.disabled = true;
+    document.getElementById('progressBar').style.width = '0%';
+    document.getElementById('propertiesContainer').innerHTML = '';
+    showSection('upload');
+}
+</script>
+{% endblock %}

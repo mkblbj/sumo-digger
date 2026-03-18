@@ -88,5 +88,27 @@
   "results.translating": "正在翻译中...",
   "results.translatingDone": "翻译完成",
   "results.translateBtn": "翻译",
-  "results.clickToCopy": "点击复制"
+  "results.clickToCopy": "点击复制",
+
+  "nav.blueprint": "图纸分析",
+  "blueprint.title": "不动产图纸PDF分析",
+  "blueprint.subtitle": "上传不动产图纸PDF，自动识别提取物件信息",
+  "blueprint.upload": "上传PDF文件",
+  "blueprint.dropHint": "拖拽PDF文件到此处，或点击选择文件",
+  "blueprint.maxSize": "最大50MB，仅支持PDF格式",
+  "blueprint.startAnalysis": "开始分析",
+  "blueprint.analyzing": "分析中...",
+  "blueprint.page": "页面",
+  "blueprint.properties": "提取的物件",
+  "blueprint.noProperties": "未提取到物件信息",
+  "blueprint.floorPlan": "户型图",
+  "blueprint.pageImages": "页面截图",
+  "blueprint.propertyType": "物件类型",
+  "blueprint.export": "导出",
+  "blueprint.newUpload": "新建分析",
+  "blueprint.types.rental": "租赁",
+  "blueprint.types.mansion": "公寓",
+  "blueprint.types.house": "一户建",
+  "blueprint.types.investment": "投资",
+  "blueprint.types.land": "土地"
 }
