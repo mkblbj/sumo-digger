@@ -408,20 +408,28 @@
             : '-';
     }
 
-    function findField(sectionedProperty, keys = [], labels = []) {
+    /** 按 dot-key 查找字段（同 key 在 schema 中多次出现时取第一次出现） */
+    function findFieldByKey(sectionedProperty, key) {
         const sections = sectionedProperty?.sections || [];
         for (const section of sections) {
             for (const field of section.fields || []) {
-                if (keys.includes(field.key) || labels.includes(field.label)) {
-                    return field;
-                }
+                if (field.key === key) return field;
             }
         }
         return null;
     }
 
-    function getFieldValue(sectionedProperty, keys = [], labels = [], preferTranslated = false) {
-        const field = findField(sectionedProperty, keys, labels);
+    function findFieldByLabel(sectionedProperty, label) {
+        const sections = sectionedProperty?.sections || [];
+        for (const section of sections) {
+            for (const field of section.fields || []) {
+                if (field.label === label) return field;
+            }
+        }
+        return null;
+    }
+
+    function resolveFieldValue(field, preferTranslated) {
         if (!field) return null;
         const translatedValue = field.translated_value;
         if (preferTranslated && translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
@@ -432,6 +440,24 @@
         }
         if (translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
             return translatedValue;
+        }
+        return null;
+    }
+
+    /**
+     * 按 keys / labels 数组顺序优先取值，并跳过空字段。
+     * 修复：租房 schema 中 basic.price_jpy 排在 rent.rent 之前，若按章节扫描会先命中空的「售价」导致顶部卡片租金错误。
+     */
+    function getFieldValue(sectionedProperty, keys = [], labels = [], preferTranslated = false) {
+        for (const k of keys) {
+            const field = findFieldByKey(sectionedProperty, k);
+            const v = resolveFieldValue(field, preferTranslated);
+            if (v !== null && v !== undefined && v !== '') return v;
+        }
+        for (const lbl of labels) {
+            const field = findFieldByLabel(sectionedProperty, lbl);
+            const v = resolveFieldValue(field, preferTranslated);
+            if (v !== null && v !== undefined && v !== '') return v;
         }
         return null;
     }

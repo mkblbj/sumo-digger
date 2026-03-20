@@ -356,20 +356,27 @@
         }
     }
 
-    function findField(sectionedProperty, keys = [], labels = []) {
+    function findFieldByKey(sectionedProperty, key) {
         const sections = sectionedProperty?.sections || [];
         for (const section of sections) {
             for (const field of section.fields || []) {
-                if (keys.includes(field.key) || labels.includes(field.label)) {
-                    return field;
-                }
+                if (field.key === key) return field;
             }
         }
         return null;
     }
 
-    function getFieldValue(sectionedProperty, keys = [], labels = [], preferTranslated = false) {
-        const field = findField(sectionedProperty, keys, labels);
+    function findFieldByLabel(sectionedProperty, label) {
+        const sections = sectionedProperty?.sections || [];
+        for (const section of sections) {
+            for (const field of section.fields || []) {
+                if (field.label === label) return field;
+            }
+        }
+        return null;
+    }
+
+    function resolveFieldValue(field, preferTranslated) {
         if (!field) return null;
         const translatedValue = field.translated_value;
         if (preferTranslated && translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
@@ -380,6 +387,21 @@
         }
         if (translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
             return translatedValue;
+        }
+        return null;
+    }
+
+    /** 按 keys / labels 顺序优先；跳过空字段（避免租房先命中空的 basic.price_jpy） */
+    function getFieldValue(sectionedProperty, keys = [], labels = [], preferTranslated = false) {
+        for (const k of keys) {
+            const field = findFieldByKey(sectionedProperty, k);
+            const v = resolveFieldValue(field, preferTranslated);
+            if (v !== null && v !== undefined && v !== '') return v;
+        }
+        for (const lbl of labels) {
+            const field = findFieldByLabel(sectionedProperty, lbl);
+            const v = resolveFieldValue(field, preferTranslated);
+            if (v !== null && v !== undefined && v !== '') return v;
         }
         return null;
     }
