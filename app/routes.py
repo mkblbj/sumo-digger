@@ -25,6 +25,8 @@ from app.scraper.buy_scraper import BuyScraper, BuyScraperError
 from app.scraper.search_parser import SuumoSearchParser, SearchParserError
 from app.scraper.auth import SuumoAuthError, get_favorites_with_login
 from app.exporters.exporter import DataExporter, ExportError
+from app.schema.property_types import PropertyType
+from app.schema.mapper import FieldMapper, detect_property_type
 
 logger = logging.getLogger(__name__)
 
@@ -257,13 +259,7 @@ def download_results(task_id: str, format: str):
 
     try:
         data = [p.to_dict(use_translated=True) for p in properties]
-        # Strip internal fields for export
-        clean_data = []
-        for d in data:
-            clean = {k: v for k, v in d.items() if not k.startswith('_')}
-            clean_data.append(clean)
-
-        file_stream, mime_type, extension = DataExporter.export(clean_data, format)
+        file_stream, mime_type, extension = DataExporter.export(data, format)
         filename = f"suumo_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}{extension}"
 
         return send_file(
@@ -399,6 +395,39 @@ def get_properties(task_id: str):
     return jsonify({
         'task': task.to_dict(),
         'properties': [p.to_dict(bilingual=True) for p in properties],
+        'page': page,
+        'per_page': per_page,
+        'total': total,
+        'total_pages': total_pages,
+    })
+
+
+@api_bp.route('/properties/<task_id>/sectioned')
+def get_properties_sectioned(task_id: str):
+    """Get properties organized by customer field sections."""
+    task = db.session.get(ScrapingTask, task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+
+    query = task.properties
+    total = query.count()
+
+    if per_page <= 0:
+        properties = query.all()
+        page = 1
+        total_pages = 1
+    else:
+        per_page = min(per_page, 200)
+        total_pages = max(1, -(-total // per_page))
+        page = min(page, total_pages)
+        properties = query.offset((page - 1) * per_page).limit(per_page).all()
+
+    return jsonify({
+        'task': task.to_dict(),
+        'properties': [p.to_sectioned_dict() for p in properties],
         'page': page,
         'per_page': per_page,
         'total': total,
@@ -590,66 +619,170 @@ def translate_single_property(property_id: int):
 
 # ==================== AI Summary API ====================
 
-@api_bp.route('/summarize/property/<int:property_id>', methods=['POST'])
-def summarize_property(property_id: int):
-    """Generate AI title or short summary for a property.
-
-    Body JSON: { "type": "title" | "summary" }
-    - title: one-line Chinese title like "南堀江 准新房1LDK 南向免押金"
-    - summary: 200-300 char Chinese paragraph
-    """
-    prop = db.session.get(Property, property_id)
-    if not prop:
-        return jsonify({'error': 'Property not found'}), 404
-
+def _generate_property_summary_items(prop: Property, summary_type: str):
     settings = Settings.get()
     if not settings.llm_api_key:
-        return jsonify({'error': 'LLM API not configured'}), 400
+        raise ValueError('LLM API not configured')
 
-    summary_type = 'title'
-    if request.is_json:
-        summary_type = request.json.get('type', 'title')
-
-    # Build property text for LLM context
     data = prop.data
     skip = {'_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL', '物件画像'}
     prop_text = '\n'.join(f'{k}: {v}' for k, v in data.items() if k not in skip and v)
 
     if summary_type == 'title':
         system = (
-            "你是日本房产信息编辑。根据物件信息生成一个简洁的中文标题。\n"
+            "你是日本房产信息编辑。根据物件信息生成3个适合中国客户阅读的中文标题候选。\n"
             "规则：\n"
-            "- 20-40字左右，不要标点符号\n"
-            "- 包含：地区/站名 + 户型 + 核心卖点（如免押金、新房、南向等）\n"
+            "- 返回 JSON 数组，例如 [\"标题1\", \"标题2\", \"标题3\"]\n"
+            "- 每个标题 20-40 字左右，不要标点符号\n"
+            "- 包含：地区/站名 + 户型 + 核心卖点\n"
             "- 地名/站名保留日文\n"
-            "- 示例：南堀江 准新房1LDK 南向免押金\n"
-            "- 示例：山坂自动锁独立洗面台租房1K公寓带步入式衣橱\n"
-            "- 只输出标题文本，不要其他内容"
+            "- 不要返回解释文字"
         )
     else:
         system = (
-            "你是日本房产信息编辑。根据物件信息写一段200-300字的简体中文介绍短文。\n"
+            "你是日本房产信息编辑。根据物件信息写3个版本的简体中文介绍短文。\n"
             "规则：\n"
+            "- 返回 JSON 数组，例如 [\"版本1\", \"版本2\", \"版本3\"]\n"
+            "- 每个版本 120-220 字\n"
             "- 涵盖：位置交通、房屋基本情况、费用、设备亮点\n"
             "- 地名/站名保留日文原文\n"
             "- 语气专业简洁，适合房产发布\n"
-            "- 只输出短文，不要标题或其他格式"
+            "- 不要返回解释文字"
         )
 
+    from app.services.llm_client import get_llm_client, extract_json
+    client = get_llm_client(settings)
+    text = client.chat(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prop_text},
+        ],
+        temperature=0.5,
+        max_tokens=2048,
+    ).strip()
+    parsed = extract_json(text)
+    if isinstance(parsed, list) and parsed:
+        items = [str(item).strip() for item in parsed if str(item).strip()][:3]
+        if items:
+            return items
+    return [text]
+
+
+@api_bp.route('/summarize/property/<int:property_id>', methods=['POST'])
+def summarize_property(property_id: int):
+    """Generate AI title or short summary for a property."""
+    prop = db.session.get(Property, property_id)
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+
+    summary_type = 'title'
+    if request.is_json:
+        summary_type = request.json.get('type', 'title')
+
     try:
-        from app.services.llm_client import get_llm_client
-        client = get_llm_client(settings)
-        text = client.chat(
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prop_text},
-            ],
-            temperature=0.5,
-            max_tokens=1024,
-        ).strip()
-        return jsonify({'ok': True, 'type': summary_type, 'text': text})
+        items = _generate_property_summary_items(prop, summary_type)
+        return jsonify({'ok': True, 'type': summary_type, 'items': items[:3], 'text': items[0]})
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         logger.error(f"AI summary error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@api_bp.route('/property/<int:property_id>/detail-assets', methods=['POST'])
+def property_detail_assets(property_id: int):
+    """Ensure translation and pre-generate title/summary candidates for detail page."""
+    prop = db.session.get(Property, property_id)
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+
+    force_translate = request.json.get('force_translate', False) if request.is_json else False
+
+    translated = prop.translated
+    if force_translate or not translated:
+        settings = Settings.get()
+        if settings.llm_api_key:
+            try:
+                from app.services.translator import TranslatorService
+                from app.services.llm_client import get_llm_client
+                translator = TranslatorService(llm_client=get_llm_client(settings))
+                translated = translator.translate_property(prop.data)
+                if translated is not None:
+                    prop.translated = translated
+                    db.session.commit()
+            except Exception as e:
+                logger.error(f"Detail asset translation error: {e}")
+
+    try:
+        title_items = _generate_property_summary_items(prop, 'title')
+        summary_items = _generate_property_summary_items(prop, 'summary')
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Detail asset summary error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+    refreshed = db.session.get(Property, property_id)
+    return jsonify({
+        'ok': True,
+        'property': refreshed.to_sectioned_dict(),
+        'title_items': title_items[:3],
+        'summary_items': summary_items[:3],
+    })
+
+
+# ==================== AI Enrichment API ====================
+
+@api_bp.route('/enrich/<task_id>', methods=['POST'])
+def enrich_task(task_id: str):
+    """Run AI enrichment on all properties in a task (exchange rate, taxes, descriptions, etc.)."""
+    task = db.session.get(ScrapingTask, task_id)
+    if not task:
+        return jsonify({'error': 'Task not found'}), 404
+
+    settings = Settings.get()
+    llm_client = None
+    if settings.llm_api_key:
+        from app.services.llm_client import get_llm_client
+        llm_client = get_llm_client(settings)
+
+    app = current_app._get_current_object()
+    thread = threading.Thread(target=run_enrichment_task, args=(app, task_id, llm_client))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'ok': True, 'message': 'Enrichment started'})
+
+
+@api_bp.route('/enrich/property/<int:property_id>', methods=['POST'])
+def enrich_single_property(property_id: int):
+    """Run AI enrichment on a single property synchronously."""
+    prop = db.session.get(Property, property_id)
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+
+    settings = Settings.get()
+    llm_client = None
+    if settings.llm_api_key:
+        from app.services.llm_client import get_llm_client
+        llm_client = get_llm_client(settings)
+
+    try:
+        from app.services.ai_enrichment import AIEnrichmentService
+        service = AIEnrichmentService(llm_client=llm_client)
+        data = dict(prop.data)
+        ptype_str = data.get('_property_type', '')
+        ptype = PropertyType.OTHER
+        for pt in PropertyType:
+            if pt.value == ptype_str:
+                ptype = pt
+                break
+        enriched = service.enrich(data, ptype)
+        prop.data = enriched
+        db.session.commit()
+        return jsonify({'ok': True, 'property': prop.to_dict(bilingual=True)})
+    except Exception as e:
+        logger.error(f"Enrichment error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -846,6 +979,7 @@ def run_scraping_task(app, task_id: str) -> None:
 
         rental_scraper = SuumoScraper()
         buy_scraper = BuyScraper()
+        mapper = FieldMapper()
 
         try:
             for i, url in enumerate(prog['urls']):
@@ -860,11 +994,15 @@ def run_scraping_task(app, task_id: str) -> None:
                         result = rental_scraper.scrape_property(url)
 
                     if result:
+                        raw = result.to_dict()
+                        ptype = detect_property_type(url, raw)
+                        normalized = mapper.normalize(raw, ptype, source_url=url)
+
                         prop = Property(
                             task_id=task_id,
                             url=url,
                         )
-                        prop.data = result.to_dict()
+                        prop.data = normalized
                         prop.image_urls = result.image_urls
                         db.session.add(prop)
                         db.session.commit()
@@ -1005,6 +1143,7 @@ def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int,
 
         rental_scraper = SuumoScraper()
         buy_scraper = BuyScraper()
+        mapper = FieldMapper()
 
         try:
             for i, url in enumerate(urls):
@@ -1018,8 +1157,12 @@ def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int,
                         result = rental_scraper.scrape_property(url)
 
                     if result:
+                        raw = result.to_dict()
+                        ptype = detect_property_type(url, raw)
+                        normalized = mapper.normalize(raw, ptype, source_url=url)
+
                         prop = Property(task_id=task_id, url=url)
-                        prop.data = result.to_dict()
+                        prop.data = normalized
                         prop.image_urls = result.image_urls
                         db.session.add(prop)
                         db.session.commit()
@@ -1096,13 +1239,21 @@ def run_blueprint_task(app, task_id: str, pdf_bytes: bytes, filename: str) -> No
 
             properties = analyzer.analyze_pdf(pdf_bytes, filename, progress_cb=on_progress)
 
+            from app.services.ai_enrichment import AIEnrichmentService
+
+            mapper = FieldMapper()
+            enrich_service = AIEnrichmentService(llm_client=llm_client)
             for prop in properties:
-                data = BlueprintAnalyzer.property_to_dict(prop)
+                raw = BlueprintAnalyzer.property_to_dict(prop)
+                ptype = detect_property_type('', raw)
+                normalized = mapper.normalize(raw, ptype, source_url=f'blueprint://{filename}')
+                normalized = enrich_service.enrich(normalized, ptype)
+
                 db_prop = Property(
                     task_id=task_id,
                     url=f'blueprint://{filename}',
                 )
-                db_prop.data = data
+                db_prop.data = normalized
                 floor_plan_urls = [
                     f'/api/blueprint/floor_plan/{os.path.basename(p)}'
                     for p in prop.floor_plan_paths
@@ -1138,3 +1289,32 @@ def run_blueprint_task(app, task_id: str, pdf_bytes: bytes, filename: str) -> No
                 with _progress_lock:
                     _progress.pop(task_id, None)
             threading.Thread(target=cleanup, daemon=True).start()
+
+
+def run_enrichment_task(app, task_id: str, llm_client=None) -> None:
+    """Run AI enrichment on all properties in a task."""
+    with app.app_context():
+        try:
+            from app.services.ai_enrichment import AIEnrichmentService
+            service = AIEnrichmentService(llm_client=llm_client)
+
+            properties = Property.query.filter_by(task_id=task_id).all()
+            for prop in properties:
+                try:
+                    data = dict(prop.data)
+                    ptype_str = data.get('_property_type', '')
+                    ptype = PropertyType.OTHER
+                    for pt in PropertyType:
+                        if pt.value == ptype_str:
+                            ptype = pt
+                            break
+                    enriched = service.enrich(data, ptype)
+                    prop.data = enriched
+                    db.session.commit()
+                    logger.info(f"Property {prop.id} enriched successfully")
+                except Exception as e:
+                    logger.error(f"Enrichment error for property {prop.id}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.error(f"Enrichment task error: {e}")

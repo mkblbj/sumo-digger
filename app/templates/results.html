@@ -328,7 +328,7 @@
         document.getElementById('propertyView').classList.remove('d-none');
 
         try {
-            const res = await fetch(`/api/properties/${taskId}?page=${propPage}&per_page=${propPerPage}`);
+            const res = await fetch(`/api/properties/${taskId}/sectioned?page=${propPage}&per_page=${propPerPage}`);
             const data = await res.json();
             currentProperties = data.properties;
             propTotalPages = data.total_pages || 1;
@@ -339,32 +339,33 @@
             document.getElementById('taskTitle').textContent =
                 `${data.total} ${i18n.t('results.property')} - ${date.toLocaleDateString()} ${date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}`;
 
-            // Calculate row offset for numbering
             const rowOffset = (propPage - 1) * propPerPage;
 
             const tbody = document.getElementById('propertyTableBody');
             tbody.innerHTML = currentProperties.map((p, i) => {
-                const name = p['物件名'] || p['_url'] || '-';
-                const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || p['価格'] || '-';
-                const layout = p['間取り'] || '-';
-                const area = fmtArea(p['専有面積'] || p['面積'] || p['土地面積'] || '-');
-                const access = p['アクセス1'] || p['交通'] || '-';
-                const hasImages = p._image_urls && p._image_urls.length > 0;
-                const isBlueprint = p._source === 'blueprint';
-                const thumbUrl = hasImages ? (isBlueprint || p._image_urls[0].startsWith('/') ? p._image_urls[0] : `/api/image/proxy?url=${encodeURIComponent(p._image_urls[0])}`) : '';
+                const name = getFieldValue(p, ['detail.building_name'], ['物件名'], true) || p._meta?.url || '-';
+                const rent = getFieldValue(p, ['rent.rent', 'basic.price_jpy', 'analysis.property_price'], ['房租', '售价（日元）', '物件价格'], true) || '-';
+                const layout = getFieldValue(p, ['basic.layout_cn'], ['户型'], true) || '-';
+                const area = fmtArea(String(getFieldValue(p, ['basic.area', 'detail.exclusive_area', 'basic.land_area', 'basic.building_area'], ['面积', '专有面积', '土地面积', '建筑面积'], true) || '-'));
+                const accessRaw = getFieldValue(p, ['detail.access'], ['交通'], true);
+                const access = Array.isArray(accessRaw) ? accessRaw[0] || '-' : String(accessRaw || '-');
+                const imageUrls = p._meta?.image_urls || [];
+                const hasImages = imageUrls.length > 0;
+                const isBlueprint = (p._meta?.url || '').startsWith('blueprint://');
+                const thumbUrl = hasImages ? (isBlueprint || imageUrls[0].startsWith('/') ? imageUrls[0] : `/api/image/proxy?url=${encodeURIComponent(imageUrls[0])}`) : '';
                 return `
                     <tr>
                         <td>${rowOffset + i + 1}</td>
                         <td>
                             <div class="d-flex align-items-center gap-2">
                                 ${hasImages ? `<img src="${thumbUrl}" style="height:32px;width:32px;object-fit:cover;border-radius:4px;" onerror="this.style.display='none'" loading="lazy">` : ''}
-                                <a href="#" class="prop-detail" data-idx="${i}">${name.substring(0, 20)}</a>
+                                <a href="#" class="prop-detail" data-idx="${i}">${String(name).substring(0, 20)}</a>
                             </div>
                         </td>
                         <td class="jpy-amount">${rent}</td>
                         <td>${layout}</td>
                         <td>${area}</td>
-                        <td>${access.substring(0, 25)}</td>
+                        <td>${String(access).substring(0, 25)}</td>
                         <td>
                             <button class="btn btn-sm btn-outline-secondary copy-btn" data-idx="${i}" title="${i18n.t('results.copy')}">
                                 <i class="bi bi-clipboard"></i>
@@ -407,6 +408,106 @@
             : '-';
     }
 
+    function findField(sectionedProperty, keys = [], labels = []) {
+        const sections = sectionedProperty?.sections || [];
+        for (const section of sections) {
+            for (const field of section.fields || []) {
+                if (keys.includes(field.key) || labels.includes(field.label)) {
+                    return field;
+                }
+            }
+        }
+        return null;
+    }
+
+    function getFieldValue(sectionedProperty, keys = [], labels = [], preferTranslated = false) {
+        const field = findField(sectionedProperty, keys, labels);
+        if (!field) return null;
+        const translatedValue = field.translated_value;
+        if (preferTranslated && translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
+            return translatedValue;
+        }
+        if (field.value !== undefined && field.value !== null && field.value !== '') {
+            return field.value;
+        }
+        if (translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
+            return translatedValue;
+        }
+        return null;
+    }
+
+    function formatPriceValue(text) {
+        if (!text || text === '-') return text || '-';
+        if (typeof CurrencyService === 'undefined' || !CurrencyService.rate) {
+            return escapeHtml(String(text));
+        }
+        return CurrencyService.format(String(text));
+    }
+
+    function formatDisplayValue(rawValue, field) {
+        const key = field?.key || '';
+        const label = field?.label || '';
+        if (rawValue === null || rawValue === undefined || rawValue === '') return '-';
+
+        if (Array.isArray(rawValue)) {
+            if (rawValue.length === 0) return '-';
+            if (rawValue.every(item => typeof item === 'string' || typeof item === 'number')) {
+                return escapeHtml(rawValue.join(' / '));
+            }
+            return rawValue.map(item => {
+                if (typeof item === 'object' && item !== null) {
+                    return escapeHtml(Object.values(item).filter(Boolean).join(' '));
+                }
+                return escapeHtml(String(item));
+            }).join('<br>');
+        }
+
+        if (typeof rawValue === 'object') {
+            return Object.entries(rawValue)
+                .map(([k, v]) => `${escapeHtml(k)}：${escapeHtml(String(v ?? '-'))}`)
+                .join('<br>');
+        }
+
+        if (/price|rent|fee|tax|cost|spend|jpy|房租|租金|售价|押金|礼金|中介费|管理费|修缮费|税/.test(key + label)) {
+            return formatPriceValue(String(rawValue));
+        }
+        if (/area|面积|㎡|m2/i.test(key + label)) {
+            return fmtArea(String(rawValue));
+        }
+        return escapeHtml(String(rawValue));
+    }
+
+    function formatFieldValue(field) {
+        const value = field?.value;
+        const translatedValue = field?.translated_value;
+        const primaryValue = translatedValue !== undefined && translatedValue !== null && translatedValue !== ''
+            ? translatedValue
+            : value;
+        const secondaryValue = translatedValue !== undefined && translatedValue !== null && translatedValue !== '' && String(translatedValue) !== String(value)
+            ? value
+            : null;
+
+        if (primaryValue === null || primaryValue === undefined || primaryValue === '') return '-';
+
+        let formatted = `<span class="field-primary">${formatDisplayValue(primaryValue, field)}</span>`;
+        if (secondaryValue !== null && secondaryValue !== undefined && secondaryValue !== '') {
+            formatted += `<div class="mt-1"><small class="text-muted d-inline-block border rounded px-2 py-1 original-text-toggle" role="button" tabindex="0" title="点击显示/隐藏日文原文">原文</small></div>`;
+            formatted += `<div class="original-text mt-1 d-none"><small class="text-muted">${formatDisplayValue(secondaryValue, field)}</small></div>`;
+        }
+        return formatted;
+    }
+
+    function buildSectionTables(sectionedProperty) {
+        return (sectionedProperty.sections || []).map(section => {
+            const rows = (section.fields || [])
+                .filter(field => field && field.label && field.label !== '图片' && field.label !== '视频' && field.label !== 'Vr链接')
+                .map(field => `<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${escapeHtml(field.label)}</th><td class="copy-cell">${formatFieldValue(field)}</td></tr>`)
+                .join('');
+            if (!rows) return '';
+            return `<div class="mb-3"><h6 class="border-bottom pb-1 mb-2">${escapeHtml(section.name)}</h6><table class="table table-sm table-bordered mb-0">${rows}</table></div>`;
+        }).join('');
+    }
+
     // ── Bilingual display helpers ──
     const NO_TRANSLATE_DISPLAY = new Set([
         '物件名',
@@ -439,20 +540,19 @@
     // ── Property detail modal ──
     function renderModal(p, idx) {
         const body = document.getElementById('modalBody');
-        const isBlueprint = p._source === 'blueprint';
-        const skipKeys = new Set(['_id', '_url', '_has_translation', '_image_urls', '_translated', '_source', '_property_type', '_floor_plan_paths', 'URL']);
+        const meta = p._meta || {};
+        const imageUrls = meta.image_urls || [];
+        const isBlueprint = (meta.url || '').startsWith('blueprint://');
         const escHtml = (t) => { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; };
-        const isYenField = (k) => /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費/.test(k);
-        const isAreaField = (k) => /面積|㎡|m2/i.test(k);
         const fmtPrice = (txt) => {
             if (!txt || txt === '-' || typeof CurrencyService === 'undefined' || !CurrencyService.rate) return txt;
             return CurrencyService.format(txt);
         };
 
-        const imageHtml = p._image_urls && p._image_urls.length > 0 ? `
+        const imageHtml = imageUrls.length > 0 ? `
             <div class="mb-3">
                 <div class="d-flex gap-2 overflow-auto pb-2" style="max-width:100%;">
-                    ${p._image_urls.slice(0, 20).map((url, i) => {
+                    ${imageUrls.slice(0, 20).map((url, i) => {
                         const imgSrc = isBlueprint || url.startsWith('/') ? url : `/api/image/proxy?url=${encodeURIComponent(url)}`;
                         const fullSrc = isBlueprint || url.startsWith('/') ? url : `/api/image/proxy?url=${encodeURIComponent(url)}`;
                         return `<img src="${imgSrc}" class="rounded shadow-sm flex-shrink-0"
@@ -461,68 +561,54 @@
                               onerror="this.style.display='none'" title="Image ${i+1}" loading="lazy">`;
                     }).join('')}
                 </div>
-                ${p._id && !isBlueprint ? `<a href="/api/image/zip/${p._id}" class="btn btn-sm btn-outline-success mt-1">
-                    <i class="bi bi-download"></i> ${i18n.t('results.downloadImages', { count: p._image_urls.length })}
+                ${meta.id && !isBlueprint ? `<a href="/api/image/zip/${meta.id}" class="btn btn-sm btn-outline-success mt-1">
+                    <i class="bi bi-download"></i> ${i18n.t('results.downloadImages', { count: imageUrls.length })}
                 </a>` : ''}
             </div>
         ` : '';
 
-        const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || p['価格'] || '-';
-        const layout = p['間取り'] || '-';
-        const area = fmtArea(p['専有面積'] || p['面積'] || p['土地面積'] || '-');
-        const deposit = p['敷金'] || '-';
-        const keyMoney = p['礼金'] || '-';
-        const location = p['所在地'] || p['住所'] || '-';
-        const access1 = p['アクセス1'] || p['交通'] || '-';
+        const rent = getFieldValue(p, ['rent.rent', 'basic.price_jpy', 'analysis.property_price'], ['房租', '售价（日元）', '物件价格'], true) || '-';
+        const layout = getFieldValue(p, ['basic.layout_cn'], ['户型'], true) || '-';
+        const area = fmtArea(String(getFieldValue(p, ['basic.area', 'detail.exclusive_area', 'basic.land_area', 'basic.building_area'], ['面积', '专有面积', '土地面积', '建筑面积'], true) || '-'));
+        const deposit = getFieldValue(p, ['rent.deposit'], ['押金'], true) || '-';
+        const keyMoney = getFieldValue(p, ['rent.key_money'], ['礼金'], true) || '-';
+        const location = getFieldValue(p, ['basic.address'], ['地址', '所在地'], true) || '-';
+        const accessRaw = getFieldValue(p, ['detail.access'], ['交通'], true);
+        const access1 = Array.isArray(accessRaw) ? accessRaw[0] || '-' : String(accessRaw || '-');
+        const sectionTables = buildSectionTables(p);
 
         const keyInfoHtml = `
             <div class="row g-2 mb-3">
                 <div class="col-4"><div class="p-2 bg-primary bg-opacity-10 rounded text-center">
-                    <small class="text-muted d-block">賃料/価格</small>
-                    <strong class="text-primary">${fmtPrice(rent)}</strong>
+                    <small class="text-muted d-block">租金/价格</small>
+                    <strong class="text-primary">${fmtPrice(String(rent))}</strong>
                 </div></div>
                 <div class="col-4"><div class="p-2 bg-light rounded text-center">
-                    <small class="text-muted d-block">間取り/面積</small>
-                    <strong>${escHtml(layout)} / ${area}</strong>
+                    <small class="text-muted d-block">户型/面积</small>
+                    <strong>${escHtml(String(layout))} / ${area}</strong>
                 </div></div>
                 <div class="col-4"><div class="p-2 bg-light rounded text-center">
-                    <small class="text-muted d-block">敷金/礼金</small>
-                    <strong>${escHtml(deposit)} / ${escHtml(keyMoney)}</strong>
+                    <small class="text-muted d-block">押金/礼金</small>
+                    <strong>${escHtml(String(deposit))} / ${escHtml(String(keyMoney))}</strong>
                 </div></div>
             </div>
             <p class="mb-2 small text-muted">
-                <i class="bi bi-geo-alt"></i> ${escHtml(location)}
+                <i class="bi bi-geo-alt"></i> ${escHtml(String(location))}
                 &nbsp;|&nbsp; <i class="bi bi-train-front"></i> ${escHtml(access1)}
             </p>`;
-
-        const rows = Object.entries(p)
-            .filter(([k]) => !skipKeys.has(k))
-            .map(([k, v]) => {
-                let val;
-                if (isYenField(k)) val = fmtPrice(String(v || '-'));
-                else if (isAreaField(k)) val = fmtArea(String(v || '-'));
-                else val = escHtml(String(v || '-'));
-                val = appendTranslation(k, val, v, p._translated);
-                return `<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${bilingualFieldName(k)}</th><td class="copy-cell">${val}</td></tr>`;
-            }).join('');
 
         body.innerHTML = `
             ${imageHtml}
             ${keyInfoHtml}
             <!-- AI Summary section -->
-            <div class="d-flex gap-2 mb-3 flex-wrap">
-                <button class="btn btn-sm btn-outline-warning ai-title-btn" data-pid="${p._id}">
-                    <i class="bi bi-lightbulb"></i> AI 生成标题
-                </button>
-                <button class="btn btn-sm btn-outline-warning ai-summary-btn" data-pid="${p._id}">
-                    <i class="bi bi-file-text"></i> AI 生成简介
-                </button>
+            <div class="mb-3 small text-muted" id="aiPrefetchStatus">
+                <span class="spinner-border spinner-border-sm me-1"></span> 正在生成 3 个标题和 3 个描述...
             </div>
             <div class="d-none mb-3" id="aiTitleResult">
                 <div class="d-flex align-items-start gap-2">
                     <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
                         <small class="text-muted d-block mb-1"><i class="bi bi-lightbulb"></i> AI 标题</small>
-                        <strong id="aiTitleText" class="user-select-all" style="cursor:pointer;"></strong>
+                        <div id="aiTitleText" class="user-select-all" style="cursor:pointer;"></div>
                     </div>
                     <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-btn" data-target="aiTitleText" title="复制">
                         <i class="bi bi-clipboard"></i>
@@ -533,7 +619,7 @@
                 <div class="d-flex align-items-start gap-2">
                     <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
                         <small class="text-muted d-block mb-1"><i class="bi bi-file-text"></i> AI 简介</small>
-                        <span id="aiSummaryText" class="user-select-all" style="cursor:pointer;"></span>
+                        <div id="aiSummaryText" class="user-select-all" style="cursor:pointer;"></div>
                     </div>
                     <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-btn" data-target="aiSummaryText" title="复制">
                         <i class="bi bi-clipboard"></i>
@@ -544,20 +630,31 @@
                 <span class="spinner-border spinner-border-sm me-1"></span> ${i18n.t('results.translating')}
             </div>
             <h6 class="border-bottom pb-1 mb-2"><i class="bi bi-list-ul"></i> ${i18n.t('results.overview')}</h6>
-            <table class="table table-sm table-bordered mb-3">${rows}</table>
-            ${!isBlueprint ? `<a href="${escHtml(p._url || p.URL || '#')}" target="_blank" class="btn btn-sm btn-outline-primary">
+            ${sectionTables}
+            ${!isBlueprint ? `<a href="${escHtml(meta.url || '#')}" target="_blank" class="btn btn-sm btn-outline-primary">
                 <i class="bi bi-box-arrow-up-right"></i> ${i18n.t('results.viewOnSuumo')}
             </a>` : ''}
         `;
         document.getElementById('modalCopyBtn').onclick = () => copyProperty(idx);
 
-        // AI summary button handlers
-        body.querySelector('.ai-title-btn')?.addEventListener('click', (e) => callAiSummary(e.currentTarget, p._id, 'title'));
-        body.querySelector('.ai-summary-btn')?.addEventListener('click', (e) => callAiSummary(e.currentTarget, p._id, 'summary'));
         body.querySelectorAll('.ai-copy-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const text = document.getElementById(btn.dataset.target)?.textContent;
                 if (text) { copyToClipboard(text).then(() => showCopyToast(text)); }
+            });
+        });
+
+        body.querySelectorAll('.original-text-toggle').forEach(toggle => {
+            toggle.addEventListener('click', () => {
+                const original = toggle.parentElement?.nextElementSibling;
+                if (original) original.classList.toggle('d-none');
+            });
+            toggle.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    const original = toggle.parentElement?.nextElementSibling;
+                    if (original) original.classList.toggle('d-none');
+                }
             });
         });
     }
@@ -566,58 +663,68 @@
      * Open property detail modal.
      * If no real translation exists, call single-property translate API synchronously.
      */
+    function renderAiItems(targetId, textId, items) {
+        const safeItems = (Array.isArray(items) ? items : []).filter(Boolean).slice(0, 3);
+        const target = document.getElementById(targetId);
+        const textEl = document.getElementById(textId);
+        if (!target || !textEl) return;
+        target.classList.toggle('d-none', safeItems.length === 0);
+        textEl.innerHTML = safeItems
+            .map((item, idx) => `<div class="mb-2 p-2 border rounded bg-white"><strong>${idx + 1}.</strong> ${escapeHtml(String(item))}</div>`)
+            .join('');
+    }
+
+    async function preloadDetailAssets(propertyId, idx) {
+        const statusEl = document.getElementById('aiPrefetchStatus');
+        try {
+            const res = await fetch(`/api/property/${propertyId}/detail-assets`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ force_translate: false }),
+            });
+            const data = await res.json();
+            if (!data.ok) throw new Error(data.error || 'Failed to preload detail assets');
+            if (data.property) currentProperties[idx] = data.property;
+            renderModal(currentProperties[idx], idx);
+            renderAiItems('aiTitleResult', 'aiTitleText', data.title_items || []);
+            renderAiItems('aiSummaryResult', 'aiSummaryText', data.summary_items || []);
+            const doneStatus = document.getElementById('aiPrefetchStatus');
+            if (doneStatus) doneStatus.classList.add('d-none');
+        } catch (e) {
+            console.error('Detail preload error:', e);
+            if (statusEl) {
+                statusEl.classList.remove('text-muted');
+                statusEl.classList.add('text-danger');
+                statusEl.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i> 标题和描述自动生成失败，请稍后重试';
+            }
+        }
+    }
+
     async function showPropertyDetail(idx) {
         const p = currentProperties[idx];
         if (!p) return;
 
-        document.getElementById('modalTitle').textContent = p['物件名'] || 'Detail';
+        document.getElementById('modalTitle').textContent = getFieldValue(p, ['detail.building_name'], ['物件名'], true) || 'Detail';
 
-        // Check if translation has real diffs
-        const hasRealTranslation = p._has_translation && p._translated && Object.entries(p).some(([k, v]) =>
-            !k.startsWith('_') && p._translated[k] && String(p._translated[k]) !== String(v)
-        );
-
-        // Render modal immediately with current data
         renderModal(p, idx);
         const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('propertyModal'));
         modal.show();
 
-        // If no real translation, call API to translate this property in real-time
-        if (!hasRealTranslation && p._id) {
-            const statusEl = document.getElementById('modalTranslateStatus');
-            if (statusEl) statusEl.classList.remove('d-none');
-
-            try {
-                const res = await fetch(`/api/translate/property/${p._id}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ force: true }),
-                });
-                const data = await res.json();
-                if (data.ok && data.property) {
-                    // Update local data and re-render modal with translations
-                    currentProperties[idx] = data.property;
-                    renderModal(data.property, idx);
-                } else {
-                    if (statusEl) statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-warning me-1"></i> ${data.error || 'Translation unavailable'}`;
-                }
-            } catch (e) {
-                console.error('[translate] Error:', e);
-                if (statusEl) statusEl.innerHTML = `<i class="bi bi-exclamation-triangle text-danger me-1"></i> Translation failed`;
-            }
+        if (p._meta?.id) {
+            preloadDetailAssets(p._meta.id, idx);
         }
     }
 
     function copyProperty(idx) {
         const p = currentProperties[idx];
         if (!p) return;
-        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls', '_translated'];
-        const text = Object.entries(p)
-            .filter(([k]) => !skipKeys.includes(k))
-            .map(([k, v]) => `${k}: ${v || '-'}`)
-            .join('\n');
+        const text = (p.sections || []).flatMap(section => {
+            const header = `【${section.name}】`;
+            const rows = (section.fields || []).map(field => `${field.label}: ${Array.isArray(field.value) ? field.value.join(' / ') : (field.value ?? '-')}`);
+            return [header, ...rows];
+        }).join('\n');
         copyToClipboard(text).then(() => {
-            showCopyToast(p['物件名'] || 'Property');
+            showCopyToast(getFieldValue(p, ['detail.building_name'], ['物件名'], true) || 'Property');
             const btn = document.querySelector(`.copy-btn[data-idx="${idx}"]`);
             if (btn) { const o = btn.innerHTML; btn.innerHTML = '<i class="bi bi-check"></i>'; setTimeout(() => btn.innerHTML = o, 1000); }
         });
@@ -634,23 +741,26 @@
     // ── Modal translate button: re-translate current property ──
     document.getElementById('modalTranslateBtn').addEventListener('click', async () => {
         const modalTitle = document.getElementById('modalTitle').textContent;
-        const idx = currentProperties.findIndex(p => (p['物件名'] || 'Detail') === modalTitle);
-        if (idx < 0 || !currentProperties[idx]._id) return;
+        const idx = currentProperties.findIndex(p => (getFieldValue(p, ['detail.building_name'], ['物件名'], true) || 'Detail') === modalTitle);
+        if (idx < 0 || !currentProperties[idx]?._meta?.id) return;
 
         const btn = document.getElementById('modalTranslateBtn');
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>' + i18n.t('results.translating');
 
         try {
-            const res = await fetch(`/api/translate/property/${currentProperties[idx]._id}`, {
+            const res = await fetch(`/api/translate/property/${currentProperties[idx]._meta.id}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ force: true }),
             });
             const data = await res.json();
             if (data.ok && data.property) {
-                currentProperties[idx] = data.property;
-                renderModal(data.property, idx);
+                await loadProperties(selectedTaskId);
+                const refreshedIdx = currentProperties.findIndex(p => (getFieldValue(p, ['detail.building_name'], ['物件名'], true) || 'Detail') === modalTitle);
+                if (refreshedIdx >= 0) {
+                    renderModal(currentProperties[refreshedIdx], refreshedIdx);
+                }
             } else {
                 alert(data.error || 'Translation failed');
             }
@@ -661,37 +771,6 @@
             btn.innerHTML = '<i class="bi bi-translate"></i> ' + i18n.t('results.translateBtn');
         }
     });
-
-    // ── AI Summary ──
-    async function callAiSummary(btn, propertyId, type) {
-        const origHtml = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> 生成中...`;
-        try {
-            const res = await fetch(`/api/summarize/property/${propertyId}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type }),
-            });
-            const data = await res.json();
-            if (data.ok) {
-                const targetId = type === 'title' ? 'aiTitleResult' : 'aiSummaryResult';
-                const textId = type === 'title' ? 'aiTitleText' : 'aiSummaryText';
-                document.getElementById(targetId).classList.remove('d-none');
-                document.getElementById(textId).textContent = data.text;
-                btn.innerHTML = `<i class="bi bi-check"></i> 已生成`;
-                btn.classList.replace('btn-outline-warning', 'btn-outline-success');
-            } else {
-                btn.innerHTML = origHtml;
-                btn.disabled = false;
-                alert(data.error || 'Failed');
-            }
-        } catch (e) {
-            console.error('AI summary error:', e);
-            btn.innerHTML = origHtml;
-            btn.disabled = false;
-        }
-    }
 
     // ── Property pagination controls ──
     document.getElementById('propPerPageSelect').addEventListener('change', (e) => {

@@ -54,9 +54,9 @@ class Property(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     task_id = db.Column(db.String(36), db.ForeignKey('scraping_task.id'), nullable=False)
     url = db.Column(db.String(500), nullable=False)
-    data_json = db.Column(db.Text, nullable=False)  # PropertyData.to_dict() serialized
-    translated_json = db.Column(db.Text, nullable=True)  # LLM translation cache
-    image_urls_json = db.Column(db.Text, default='[]')  # Image URLs
+    data_json = db.Column(db.Text, nullable=False)
+    translated_json = db.Column(db.Text, nullable=True)
+    image_urls_json = db.Column(db.Text, default='[]')
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     @property
@@ -83,6 +83,11 @@ class Property(db.Model):
     def image_urls(self, value):
         self.image_urls_json = json.dumps(value, ensure_ascii=False)
 
+    @property
+    def property_type_label(self) -> str:
+        """Return the customer property type label from stored data."""
+        return self.data.get('_property_type', '')
+
     def to_dict(self, use_translated=True, bilingual=False):
         """Return property data.
 
@@ -105,6 +110,70 @@ class Property(db.Model):
         base['_has_translation'] = self.translated is not None
         base['_image_urls'] = self.image_urls
         return base
+
+    def to_sectioned_dict(self):
+        """Return property data organized by customer sections.
+
+        Returns: { '_meta': {...}, 'sections': [ { 'name': '基本信息', 'fields': [...] }, ... ] }
+        """
+        from app.schema.property_types import PropertyType
+        from app.schema.field_definitions import get_field_definitions
+
+        data = self.data
+        ptype_str = data.get('_property_type', '')
+        ptype = None
+        for pt in PropertyType:
+            if pt.value == ptype_str:
+                ptype = pt
+                break
+
+        translated = self.translated or {}
+        result = {
+            '_meta': {
+                'id': self.id,
+                'url': self.url,
+                'property_type': ptype_str,
+                'image_urls': self.image_urls,
+                'has_translation': bool(self.translated),
+            },
+            'sections': [],
+        }
+
+        if not ptype:
+            result['sections'].append({
+                'name': '物件信息',
+                'fields': [
+                    {
+                        'label': k,
+                        'key': k,
+                        'value': v,
+                        'translated_value': translated.get(k),
+                    }
+                    for k, v in data.items() if not k.startswith('_')
+                ],
+            })
+            return result
+
+        sections = get_field_definitions(ptype)
+        seen_keys = set()
+        for section in sections:
+            fields = []
+            for f in section.fields:
+                if f.key in seen_keys:
+                    continue
+                seen_keys.add(f.key)
+                fields.append({
+                    'label': f.label,
+                    'key': f.key,
+                    'value': data.get(f.key),
+                    'translated_value': translated.get(f.key),
+                })
+            result['sections'].append({
+                'name': section.name,
+                'fields': fields,
+            })
+
+        return result
 
 
 class Settings(db.Model):

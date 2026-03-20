@@ -220,7 +220,7 @@ function pollProgress(taskId) {
 
             if (data.status === 'completed') {
                 evtSource.close();
-                loadResults(taskId);
+                redirectToResults(taskId);
             } else if (data.status === 'error') {
                 evtSource.close();
                 const errMsg = data.errors && data.errors.length > 0
@@ -245,7 +245,7 @@ async function checkFinalStatus(taskId) {
         const res = await fetch(`/api/scrape/status/${taskId}`);
         const data = await res.json();
         if (data.status === 'completed') {
-            loadResults(taskId);
+            redirectToResults(taskId);
         } else if (data.status === 'failed' || data.status === 'error') {
             showError(data.errors?.[0]?.error || 'Analysis failed');
         } else {
@@ -254,6 +254,10 @@ async function checkFinalStatus(taskId) {
     } catch (e) {
         showError('Connection lost');
     }
+}
+
+function redirectToResults(taskId) {
+    window.location.href = `/results?task=${taskId}`;
 }
 
 function updateProgress(data) {

@@ -1,11 +1,13 @@
 /**
  * Bilingual display utilities for SUUMO property data.
  * - Japanese → Chinese field name mapping
+ * - Dot-key → Chinese label mapping (for normalized data)
  * - Bilingual field name rendering
+ * - Compatibility getter for old/new data formats
  * - Click-to-copy for table cells
  */
 
-// ── Japanese → Chinese field name mapping ──
+// ── Japanese → Chinese field name mapping (old format) ──
 const FIELD_NAME_ZH = {
     '物件名': '物件名',
     '賃料': '租金',
@@ -77,6 +79,76 @@ const FIELD_NAME_ZH = {
     '間取り詳細': '户型详情',
 };
 
+// ── Dot-key → Chinese label mapping (normalized data format) ──
+const DOT_KEY_LABELS = {
+    'media.images': '图片', 'media.videos': '视频', 'media.vr_links': 'VR链接',
+    'basic.city_ward': '所在城市', 'basic.property_name': '物件名称',
+    'basic.property_type': '物件类型', 'basic.tags': '物件标签',
+    'basic.price_jpy': '售价（日元）', 'basic.price_cny': '售价（人民币）',
+    'basic.layout_cn': '户型', 'basic.area': '面积',
+    'basic.land_area': '土地面积', 'basic.building_area': '建筑面积',
+    'basic.unit_price': '单价', 'basic.estimated_rent': '预估租金',
+    'basic.address': '地址', 'basic.longitude': '经度', 'basic.latitude': '纬度',
+    'basic.nearby_landmark': '附近标志', 'basic.built_month': '建成日期',
+    'basic.monthly_rent': '月租金', 'basic.estimated_roi_pct': '回报率',
+    'detail.building_name': '物件名', 'detail.access': '交通',
+    'detail.total_units': '总户数', 'detail.sub_type': '类型',
+    'detail.structure': '构造', 'detail.orientation': '朝向',
+    'detail.exclusive_area': '专有面积', 'detail.other_areas': '其他面积',
+    'detail.floor': '楼层', 'detail.total_floors': '总楼层',
+    'detail.land_or_invest_status': '现状', 'detail.total_lots': '总区划数',
+    'detail.property_status': '物件现状', 'detail.parking': '停车场',
+    'detail.transaction_form': '交易形式', 'detail.remark': '备注',
+    'rent.rent': '房租', 'rent.deposit': '押金', 'rent.key_money': '礼金',
+    'rent.common_service_fee': '共益费', 'rent.contract_term': '合同期',
+    'rent.initial_rent': '租金', 'rent.initial_total_fee': '总费用',
+    'analysis.property_price': '物件价格', 'analysis.acquisition_tax': '不动产取得税',
+    'analysis.registration_tax': '登录免许税', 'analysis.stamp_tax': '印花税',
+    'analysis.scrivener_fee': '司法书士费', 'analysis.brokerage_fee': '中介费',
+    'analysis.total_spend': '实际总支出', 'analysis.fixed_asset_tax': '固定资产税',
+    'analysis.city_planning_tax': '都市计划税', 'analysis.trust_fee': '托管费',
+    'analysis.annual_total_cost': '一年总成本',
+    'analysis.monthly_rent_income': '月租金收入', 'analysis.annual_rent_income': '年租金收入',
+    'analysis.annual_roi_pct': '年回报率',
+    'analysis_or_detail.management_fee': '管理费', 'analysis_or_detail.repair_fee': '修缮费',
+    'analysis_or_detail.other_fees': '其他费用',
+    'land.rights': '土地权利', 'land.building_coverage_pct': '建蔽率',
+    'land.far_pct': '容积率', 'land.zoning': '用途地域',
+    'land.private_road_burden': '私道负担', 'land.restrictions': '限制事项',
+    'management.method': '管理方式', 'management.company': '管理公司',
+    'building.constructor': '施工公司', 'building.built_month': '建成时间',
+    'building.total_area': '总面积', 'building.total_units': '总套数',
+    'building.seismic_type': '抗震构造', 'building.location': '所在地',
+    'building.renovation': '翻新',
+    'deal.delivery_text': '引渡时间文本', 'deal.delivery_time': '引渡时间',
+    'amenities.facilities': '配套设施',
+    'ai.description_candidates': '物件介绍',
+    'poi.schools': '学校', 'poi.business_districts': '商圈', 'poi.parks': '公园设施',
+};
+
+/**
+ * Get a property value trying multiple possible keys (old JP + new dot-key format).
+ * Returns the first non-null/non-undefined/non-empty match, or defaultVal.
+ * @param {object} p - property data object
+ * @param {string[]} keys - list of keys to try, in priority order
+ * @param {*} defaultVal - fallback value (default '-')
+ */
+function pGet(p, keys, defaultVal) {
+    if (defaultVal === undefined) defaultVal = '-';
+    for (const k of keys) {
+        const v = p[k];
+        if (v !== undefined && v !== null && v !== '') return v;
+    }
+    return defaultVal;
+}
+
+/**
+ * Check if a property uses the new normalized dot-key format.
+ */
+function isNormalizedData(p) {
+    return p.hasOwnProperty('_property_type') || p.hasOwnProperty('basic.address') || p.hasOwnProperty('basic.price_jpy');
+}
+
 // ── Helper: escape HTML ──
 function _escHtml(t) {
     const d = document.createElement('div');
@@ -85,13 +157,21 @@ function _escHtml(t) {
 }
 
 /**
- * Render a bilingual field name: Japanese original + Chinese below.
- * If no Chinese mapping exists, returns just the Japanese name.
+ * Render a customer-facing field name.
+ * Only show the Chinese label and never expose internal keys.
  */
-function bilingualFieldName(jaName) {
-    const zhName = FIELD_NAME_ZH[jaName];
-    if (!zhName || zhName === jaName) return _escHtml(jaName);
-    return `${_escHtml(jaName)}<br><small class="text-info">${_escHtml(zhName)}</small>`;
+function bilingualFieldName(fieldKey) {
+    const dotLabel = DOT_KEY_LABELS[fieldKey];
+    if (dotLabel) {
+        return _escHtml(dotLabel);
+    }
+
+    const zhName = FIELD_NAME_ZH[fieldKey];
+    if (zhName) {
+        return _escHtml(zhName);
+    }
+
+    return _escHtml(fieldKey);
 }
 
 /**

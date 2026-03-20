@@ -302,7 +302,7 @@
     // ── Inline Results Display ──
     async function showInlineResults(taskId) {
         try {
-            const res = await fetch(`/api/properties/${taskId}?per_page=0`);
+            const res = await fetch(`/api/properties/${taskId}/sectioned?per_page=0`);
             const data = await res.json();
             const properties = data.properties;
 
@@ -330,6 +330,8 @@
             container.innerHTML = properties.map((p, idx) => buildPropertyCard(p, idx)).join('');
 
             document.getElementById('inlineResults').classList.remove('d-none');
+            attachAiHandlers(container);
+            bindOriginalTextToggles(container);
 
             // Smooth scroll to results
             document.getElementById('inlineResults').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -345,10 +347,8 @@
             });
 
             // AI summary button handlers
-            attachAiHandlers(container);
-
-            // Auto-translate: fire translate API for each untranslated property
-            autoTranslateAll(container, properties);
+        // Auto-translate and prefetch AI assets
+        autoTranslateAll(container, properties);
 
         } catch (e) {
             console.error('Failed to load inline results:', e);
@@ -356,42 +356,111 @@
         }
     }
 
+    function findField(sectionedProperty, keys = [], labels = []) {
+        const sections = sectionedProperty?.sections || [];
+        for (const section of sections) {
+            for (const field of section.fields || []) {
+                if (keys.includes(field.key) || labels.includes(field.label)) {
+                    return field;
+                }
+            }
+        }
+        return null;
+    }
+
+    function getFieldValue(sectionedProperty, keys = [], labels = [], preferTranslated = false) {
+        const field = findField(sectionedProperty, keys, labels);
+        if (!field) return null;
+        const translatedValue = field.translated_value;
+        if (preferTranslated && translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
+            return translatedValue;
+        }
+        if (field.value !== undefined && field.value !== null && field.value !== '') {
+            return field.value;
+        }
+        if (translatedValue !== undefined && translatedValue !== null && translatedValue !== '') {
+            return translatedValue;
+        }
+        return null;
+    }
+
+    function formatSectionValue(rawValue, field) {
+        const key = field?.key || '';
+        const text = key + (field?.label || '');
+        if (rawValue === null || rawValue === undefined || rawValue === '') return '-';
+        if (Array.isArray(rawValue)) {
+            if (rawValue.length === 0) return '-';
+            if (rawValue.every(item => typeof item === 'string' || typeof item === 'number')) {
+                return escapeHtml(rawValue.join(' / '));
+            }
+            return rawValue.map(item => {
+                if (typeof item === 'object' && item !== null) {
+                    return escapeHtml(Object.values(item).filter(Boolean).join(' '));
+                }
+                return escapeHtml(String(item));
+            }).join('<br>');
+        }
+        if (typeof rawValue === 'object') {
+            return Object.entries(rawValue).map(([k, v]) => `${escapeHtml(k)}：${escapeHtml(String(v ?? '-'))}`).join('<br>');
+        }
+        if (isYenField(text)) return (typeof CurrencyService !== 'undefined' ? CurrencyService.format(String(rawValue)) : escapeHtml(String(rawValue)));
+        if (isAreaField(text)) return fmtArea(String(rawValue));
+        return escapeHtml(String(rawValue));
+    }
+
+    function formatSectionField(field) {
+        const primaryValue = field?.translated_value !== undefined && field?.translated_value !== null && field?.translated_value !== ''
+            ? field.translated_value
+            : field?.value;
+        const secondaryValue = field?.translated_value !== undefined && field?.translated_value !== null && field?.translated_value !== '' && String(field.translated_value) !== String(field.value)
+            ? field.value
+            : null;
+        let html = `<span class="field-primary">${formatSectionValue(primaryValue, field)}</span>`;
+        if (secondaryValue !== null && secondaryValue !== undefined && secondaryValue !== '') {
+            html += `<div class="mt-1"><small class="text-muted d-inline-block border rounded px-2 py-1 original-text-toggle" role="button" tabindex="0" title="点击显示/隐藏日文原文">原文</small></div>`;
+            html += `<div class="original-text mt-1 d-none"><small class="text-muted">${formatSectionValue(secondaryValue, field)}</small></div>`;
+        }
+        return html;
+    }
+
     /**
      * Build a full property card HTML string.
-     * Includes: images, key info, and complete 物件概要 table.
+     * Includes: images, key info, and customer sections.
      */
     function buildPropertyCard(p, idx) {
-        const name = p['物件名'] || 'Property';
-        const url = p['_url'] || p['URL'] || '#';
+        const meta = p._meta || {};
+        const name = getFieldValue(p, ['detail.building_name'], ['物件名'], true) || 'Property';
+        const url = meta.url || '#';
 
-        // ── Images ──
         let imageHtml = '';
-        if (p._image_urls && p._image_urls.length > 0) {
+        const isBlueprint = (meta.url || '').startsWith('blueprint://');
+        const imageUrls = meta.image_urls || [];
+        if (imageUrls.length > 0) {
             imageHtml = `
                 <div class="d-flex gap-2 overflow-auto pb-2 mb-3" style="max-width:100%;">
-                    ${p._image_urls.slice(0, 20).map((imgUrl, i) =>
-                        `<img src="/api/image/proxy?url=${encodeURIComponent(imgUrl)}"
+                    ${imageUrls.slice(0, 20).map((imgUrl, i) => {
+                        const src = isBlueprint || imgUrl.startsWith('/') ? imgUrl : `/api/image/proxy?url=${encodeURIComponent(imgUrl)}`;
+                        return `<img src="${src}"
                               class="rounded shadow-sm flex-shrink-0"
                               style="height:120px; cursor:pointer; object-fit:cover;"
-                              onclick="window.open('/api/image/proxy?url=${encodeURIComponent(imgUrl)}','_blank')"
+                              onclick="window.open('${src}','_blank')"
                               onerror="this.style.display='none'"
-                              title="Image ${i+1}" loading="lazy">`
-                    ).join('')}
+                              title="Image ${i+1}" loading="lazy">`;
+                    }).join('')}
                 </div>
-                ${p._id ? `<a href="/api/image/zip/${p._id}" class="btn btn-sm btn-outline-success mb-3">
-                    <i class="bi bi-download"></i> 下载全部 ${p._image_urls.length} 张图片 (ZIP)
+                ${meta.id && !isBlueprint ? `<a href="/api/image/zip/${meta.id}" class="btn btn-sm btn-outline-success mb-3">
+                    <i class="bi bi-download"></i> 下载全部 ${imageUrls.length} 张图片 (ZIP)
                 </a>` : ''}`;
         }
 
-        // ── Key Info (highlighted) ──
-        const rent = p['賃料'] || p['賃料・初期費用'] || p['販売価格'] || '-';
-        const mgmt = p['管理費・共益費'] || '-';
-        const deposit = p['敷金'] || '-';
-        const keyMoney = p['礼金'] || '-';
-        const layout = p['間取り'] || '-';
-        const area = fmtArea(p['専有面積'] || '-');
-        const access1 = p['アクセス1'] || '-';
-        const location = p['所在地'] || '-';
+        const rent = getFieldValue(p, ['rent.rent', 'basic.price_jpy'], ['房租', '售价（日元）', '物件价格'], true) || '-';
+        const deposit = getFieldValue(p, ['rent.deposit'], ['押金'], true) || '-';
+        const keyMoney = getFieldValue(p, ['rent.key_money'], ['礼金'], true) || '-';
+        const layout = getFieldValue(p, ['basic.layout_cn'], ['户型'], true) || '-';
+        const area = fmtArea(String(getFieldValue(p, ['basic.area', 'basic.land_area', 'basic.building_area', 'detail.exclusive_area'], ['面积', '土地面积', '建筑面积', '专有面积'], true) || '-'));
+        const accessRaw = getFieldValue(p, ['detail.access'], ['交通'], true);
+        const access1 = Array.isArray(accessRaw) ? accessRaw[0] || '-' : String(accessRaw || '-');
+        const location = getFieldValue(p, ['basic.address'], ['地址', '所在地'], true) || '-';
 
         const formatPrice = (txt) => {
             if (!txt || txt === '-' || typeof CurrencyService === 'undefined' || !CurrencyService.rate) return txt;
@@ -402,72 +471,36 @@
             <div class="row g-2 mb-3">
                 <div class="col-sm-4">
                     <div class="p-2 bg-primary bg-opacity-10 rounded text-center">
-                        <small class="text-muted d-block">賃料 / 価格</small>
+                        <small class="text-muted d-block">租金 / 价格</small>
                         <strong class="fs-5 text-primary">${formatPrice(rent)}</strong>
                     </div>
                 </div>
                 <div class="col-sm-4">
                     <div class="p-2 bg-light rounded text-center">
-                        <small class="text-muted d-block">間取り / 面積</small>
+                        <small class="text-muted d-block">户型 / 面积</small>
                         <strong>${layout} / ${area}</strong>
                     </div>
                 </div>
                 <div class="col-sm-4">
                     <div class="p-2 bg-light rounded text-center">
-                        <small class="text-muted d-block">敷金 / 礼金</small>
+                        <small class="text-muted d-block">押金 / 礼金</small>
                         <strong>${deposit} / ${keyMoney}</strong>
                     </div>
                 </div>
             </div>
             <div class="mb-3">
-                <small class="text-muted"><i class="bi bi-geo-alt"></i> ${location}</small><br>
+                <small class="text-muted"><i class="bi bi-geo-alt"></i> ${String(location)}</small><br>
                 <small class="text-muted"><i class="bi bi-train-front"></i> ${access1}</small>
             </div>`;
 
-        // ── 物件概要 (complete table) ──
-        // Skip internal fields and already-displayed key fields
-        const skipKeys = new Set([
-            '_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL'
-        ]);
-
-        // Group 1: main info (shown at top of table)
-        const mainKeys = [
-            '物件名', '賃料', '管理費・共益費', '敷金', '礼金', '保証金', '敷引・償却',
-            '間取り', '専有面積', '向き', '建物種別', '築年数', '階',
-            'アクセス1', 'アクセス2', 'アクセス3', '所在地', '部屋の特徴・設備'
-        ];
-
-        // Build ordered table rows: main fields first, then remaining (物件概要 extras)
-        const tableRows = [];
-        const usedKeys = new Set(skipKeys);
-
-        for (const k of mainKeys) {
-            if (p[k] !== undefined && p[k] !== '') {
-                let val;
-                if (isYenField(k)) val = formatPrice(String(p[k]));
-                else if (isAreaField(k)) val = fmtArea(String(p[k]));
-                else val = escapeHtml(String(p[k]));
-                val = appendTranslation(k, val, p[k], p._translated);
-                tableRows.push(`<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${bilingualFieldName(k)}</th><td class="copy-cell">${val}</td></tr>`);
-                usedKeys.add(k);
-            }
-        }
-
-        // Remaining fields (物件概要 extra data)
-        for (const [k, v] of Object.entries(p)) {
-            if (usedKeys.has(k) || v === '' || v === undefined || v === null) continue;
-            let val;
-            if (isYenField(k)) val = formatPrice(String(v));
-            else if (isAreaField(k)) val = fmtArea(String(v));
-            else val = escapeHtml(String(v));
-            val = appendTranslation(k, val, v, p._translated);
-            tableRows.push(`<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${bilingualFieldName(k)}</th><td class="copy-cell">${val}</td></tr>`);
-        }
-
-        // Translation status indicator
-        const transStatus = p._has_translation
-            ? '<span class="badge bg-success-subtle text-success"><i class="bi bi-check"></i> 已翻译</span>'
-            : `<span class="badge bg-light text-muted translate-status" data-idx="${idx}"><span class="spinner-border spinner-border-sm" style="width:.5rem;height:.5rem;"></span> 翻译中</span>`;
+        const sectionTables = (p.sections || []).map(section => {
+            const rows = (section.fields || [])
+                .filter(field => field.label && !['图片', '视频', 'Vr链接'].includes(field.label))
+                .map(field => `<tr><th class="text-nowrap bg-light copy-cell" style="width:160px;">${escapeHtml(field.label)}</th><td class="copy-cell">${formatSectionField(field)}</td></tr>`)
+                .join('');
+            if (!rows) return '';
+            return `<div class="mb-3"><h6 class="border-bottom pb-1 mb-2">${escapeHtml(section.name)}</h6><table class="table table-sm table-bordered mb-0"><tbody>${rows}</tbody></table></div>`;
+        }).join('');
 
         return `
         <div class="card mb-4 shadow-sm">
@@ -477,7 +510,6 @@
                     <a href="${escapeHtml(url)}" target="_blank" class="ms-2 small text-decoration-none">
                         <i class="bi bi-box-arrow-up-right"></i> SUUMO
                     </a>
-                    ${transStatus}
                 </div>
                 <button class="btn btn-sm btn-outline-secondary copy-prop-btn" data-idx="${idx}">
                     <i class="bi bi-clipboard"></i> 复制
@@ -486,20 +518,15 @@
             <div class="card-body">
                 ${imageHtml}
                 ${keyInfoHtml}
-                <!-- AI Summary buttons -->
-                <div class="d-flex gap-2 mb-3 flex-wrap">
-                    <button class="btn btn-sm btn-outline-warning ai-title-btn" data-pid="${p._id}" data-idx="${idx}">
-                        <i class="bi bi-lightbulb"></i> AI 生成标题
-                    </button>
-                    <button class="btn btn-sm btn-outline-warning ai-summary-btn" data-pid="${p._id}" data-idx="${idx}">
-                        <i class="bi bi-file-text"></i> AI 生成简介
-                    </button>
+                <!-- AI Summary results -->
+                <div class="small text-muted mb-3 ai-prefetch-status" data-idx="${idx}">
+                    <span class="spinner-border spinner-border-sm me-1"></span> 正在生成 3 个标题和 3 个描述...
                 </div>
                 <div class="d-none mb-3 ai-title-result" data-idx="${idx}">
                     <div class="d-flex align-items-start gap-2">
                         <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
                             <small class="text-muted d-block mb-1"><i class="bi bi-lightbulb"></i> AI 标题</small>
-                            <strong class="ai-title-text user-select-all" style="cursor:pointer;"></strong>
+                            <div class="ai-title-text user-select-all" style="cursor:pointer;"></div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-title" data-idx="${idx}" title="复制"><i class="bi bi-clipboard"></i></button>
                     </div>
@@ -508,16 +535,12 @@
                     <div class="d-flex align-items-start gap-2">
                         <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
                             <small class="text-muted d-block mb-1"><i class="bi bi-file-text"></i> AI 简介</small>
-                            <span class="ai-summary-text user-select-all" style="cursor:pointer;"></span>
+                            <div class="ai-summary-text user-select-all" style="cursor:pointer;"></div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-summary" data-idx="${idx}" title="复制"><i class="bi bi-clipboard"></i></button>
                     </div>
                 </div>
-                <table class="table table-sm table-bordered mb-0">
-                    <tbody>
-                        ${tableRows.join('')}
-                    </tbody>
-                </table>
+                ${sectionTables}
             </div>
         </div>`;
     }
@@ -550,12 +573,12 @@
 
     /** Check if a field name is likely a price field */
     function isYenField(key) {
-        return /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費/.test(key);
+        return /賃料|管理費|敷金|礼金|保証金|償却|駐車場|価格|費|price|rent|deposit|key_money|fee|tax|cost|spend/.test(key);
     }
 
     /** Check if a field name is an area field */
     function isAreaField(key) {
-        return /面積|㎡|m2/i.test(key);
+        return /面積|㎡|m2|area/i.test(key);
     }
 
     /** Format m2 → m² (superscript) */
@@ -571,11 +594,11 @@
     }
 
     function copyPropertyText(p) {
-        const skipKeys = ['_id', '_url', '_has_translation', '_image_urls', '_translated'];
-        const text = Object.entries(p)
-            .filter(([k]) => !skipKeys.includes(k))
-            .map(([k, v]) => `${k}: ${v || '-'}`)
-            .join('\n');
+        const text = (p.sections || []).flatMap(section => {
+            const header = `【${section.name}】`;
+            const rows = (section.fields || []).map(field => `${field.label}: ${Array.isArray(field.value) ? field.value.join(' / ') : (field.value ?? '-')}`);
+            return [header, ...rows];
+        }).join('\n');
         copyToClipboard(text);
     }
 
@@ -595,16 +618,26 @@
             copyBtn.innerHTML = '<i class="bi bi-check"></i> 已复制';
             setTimeout(() => { copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> 复制'; }, 1500);
         });
-        attachAiHandlersForCard(card);
+        bindOriginalTextToggles(card);
+    }
+
+    function bindOriginalTextToggles(container) {
+        container.querySelectorAll('.original-text-toggle').forEach(toggle => {
+            toggle.addEventListener('click', () => {
+                const original = toggle.parentElement?.nextElementSibling;
+                if (original) original.classList.toggle('d-none');
+            });
+            toggle.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    const original = toggle.parentElement?.nextElementSibling;
+                    if (original) original.classList.toggle('d-none');
+                }
+            });
+        });
     }
 
     function attachAiHandlers(container) {
-        container.querySelectorAll('.ai-title-btn').forEach(btn => {
-            btn.addEventListener('click', () => callAiSummaryCard(btn, 'title'));
-        });
-        container.querySelectorAll('.ai-summary-btn').forEach(btn => {
-            btn.addEventListener('click', () => callAiSummaryCard(btn, 'summary'));
-        });
         container.querySelectorAll('.ai-copy-title').forEach(btn => {
             btn.addEventListener('click', () => {
                 const idx = btn.dataset.idx;
@@ -621,8 +654,6 @@
     }
 
     function attachAiHandlersForCard(card) {
-        card.querySelector('.ai-title-btn')?.addEventListener('click', function() { callAiSummaryCard(this, 'title'); });
-        card.querySelector('.ai-summary-btn')?.addEventListener('click', function() { callAiSummaryCard(this, 'summary'); });
         card.querySelector('.ai-copy-title')?.addEventListener('click', function() {
             const el = card.querySelector('.ai-title-text');
             if (el) navigator.clipboard.writeText(el.textContent);
@@ -631,39 +662,59 @@
             const el = card.querySelector('.ai-summary-text');
             if (el) navigator.clipboard.writeText(el.textContent);
         });
+        bindOriginalTextToggles(card);
     }
 
-    async function callAiSummaryCard(btn, type) {
-        const pid = btn.dataset.pid;
-        const idx = btn.dataset.idx;
-        if (!pid) return;
-        const origHtml = btn.innerHTML;
-        btn.disabled = true;
-        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> 生成中...`;
+    function renderAiItemsForCard(card, type, items) {
+        const resultEl = card.querySelector(type === 'title' ? '.ai-title-result' : '.ai-summary-result');
+        const textEl = card.querySelector(type === 'title' ? '.ai-title-text' : '.ai-summary-text');
+        const safeItems = (Array.isArray(items) ? items : []).filter(Boolean).slice(0, 3);
+        if (resultEl) resultEl.classList.toggle('d-none', safeItems.length === 0);
+        if (textEl) {
+            textEl.innerHTML = safeItems
+                .map((item, idx) => `<div class="mb-2 p-2 border rounded bg-white"><strong>${idx + 1}.</strong> ${escapeHtml(String(item))}</div>`)
+                .join('');
+        }
+    }
+
+    async function prefetchCardAssets(container, properties, i) {
+        const p = properties[i];
+        if (!p?._meta?.id) return;
+        const card = container.children[i];
+        if (!card) return;
         try {
-            const res = await fetch(`/api/summarize/property/${pid}`, {
+            const res = await fetch(`/api/property/${p._meta.id}/detail-assets`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type }),
+                body: JSON.stringify({ force_translate: false }),
             });
             const data = await res.json();
-            if (data.ok) {
-                const card = btn.closest('.card');
-                const resultEl = card.querySelector(type === 'title' ? '.ai-title-result' : '.ai-summary-result');
-                const textEl = card.querySelector(type === 'title' ? '.ai-title-text' : '.ai-summary-text');
-                if (resultEl) resultEl.classList.remove('d-none');
-                if (textEl) textEl.textContent = data.text;
-                btn.innerHTML = `<i class="bi bi-check"></i> 已生成`;
-                btn.classList.replace('btn-outline-warning', 'btn-outline-success');
-            } else {
-                btn.innerHTML = origHtml;
-                btn.disabled = false;
-                alert(data.error || 'Failed');
+            if (!data.ok) throw new Error(data.error || 'Failed to preload detail assets');
+            if (data.property) {
+                properties[i] = data.property;
+                const tmp = document.createElement('div');
+                tmp.innerHTML = buildPropertyCard(properties[i], i);
+                card.replaceWith(tmp.firstElementChild);
+                reattachCardHandlers(container, properties, i);
+                const nextCard = container.children[i];
+                if (nextCard) {
+                    renderAiItemsForCard(nextCard, 'title', data.title_items || []);
+                    renderAiItemsForCard(nextCard, 'summary', data.summary_items || []);
+                    nextCard.querySelector('.ai-prefetch-status')?.classList.add('d-none');
+                }
+                return;
             }
+            renderAiItemsForCard(card, 'title', data.title_items || []);
+            renderAiItemsForCard(card, 'summary', data.summary_items || []);
+            card.querySelector('.ai-prefetch-status')?.classList.add('d-none');
         } catch (e) {
-            console.error('AI summary error:', e);
-            btn.innerHTML = origHtml;
-            btn.disabled = false;
+            console.error('AI prefetch error:', e);
+            const status = card.querySelector('.ai-prefetch-status');
+            if (status) {
+                status.classList.remove('text-muted');
+                status.classList.add('text-danger');
+                status.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i> 自动生成失败';
+            }
         }
     }
 
@@ -689,6 +740,7 @@
                         reattachCardHandlers(container, properties, i);
                     }
                 }
+                await prefetchCardAssets(container, properties, i);
             } catch (e) {
                 console.error(`Auto-translate property ${i} failed:`, e);
                 // Update status badge to show failure
