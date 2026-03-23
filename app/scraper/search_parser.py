@@ -31,11 +31,16 @@ class SuumoSearchParser:
     SEARCH_PATTERNS = [
         # Rental search: /jj/chintai/ichiran/...
         re.compile(r'^https?://suumo\.jp/jj/chintai/ichiran/'),
-        # Condo search: /jj/bukken/ichiran/ or /ms/chuko/...
+        # Aggregated buy search entry points
         re.compile(r'^https?://suumo\.jp/jj/bukken/ichiran/'),
+        # Direct search result pages by property category
         re.compile(r'^https?://suumo\.jp/ms/chuko/'),
-        # Detached house search
+        re.compile(r'^https?://suumo\.jp/ms/shinchiku/'),
         re.compile(r'^https?://suumo\.jp/ikkodate/chuko/'),
+        re.compile(r'^https?://suumo\.jp/ikkodate/'),
+        re.compile(r'^https?://suumo\.jp/chukoikkodate/'),
+        re.compile(r'^https?://suumo\.jp/tochi/'),
+        re.compile(r'^https?://suumo\.jp/toushi/'),
         # Generic search catch-all
         re.compile(r'^https?://suumo\.jp/.*/ichiran/'),
     ]
@@ -138,30 +143,42 @@ class SuumoSearchParser:
     def _extract_detail_urls(self, soup: BeautifulSoup) -> List[str]:
         """Extract property detail URLs from a search result page."""
         urls = []
+        buy_segments = ('ms', 'ikkodate', 'chukoikkodate', 'tochi', 'toushi')
 
-        # Rental: cassetteitem links
-        for a in soup.select('a.js-cassette_link_href[href*="/chintai/"], a.js-cassette_link[href*="/chintai/"]'):
+        # Strategy 1: rental detail links from cassette cards
+        for a in soup.select('a.js-cassette_link_href[href], a.js-cassette_link[href]'):
             href = a.get('href', '')
-            if href and '/chintai/bc_' in href or '/chintai/jnc_' in href:
+            if href and ('/chintai/bc_' in href or '/chintai/jnc_' in href):
                 url = self._normalize_url(href)
                 if url:
                     urls.append(url)
 
-        # Buy (ms / ikkodate): various link patterns
-        for a in soup.select('a[href*="/ms/"], a[href*="/ikkodate/"]'):
+        # Strategy 2: property title links on buy/sell result pages
+        for a in soup.select('.property_unit-title a[href], h2.property_unit-title a[href]'):
             href = a.get('href', '')
-            # Only detail pages, not search/ichiran pages
-            if href and '/ichiran/' not in href and 'detail' in href.lower() or re.search(r'/(ms|ikkodate)/\d+/', href):
+            if (
+                href
+                and '/ichiran/' not in href
+                and '/jj/' not in href
+                and '/rooms/' not in href
+                and any(f'/{segment}/' in href for segment in buy_segments)
+            ):
                 url = self._normalize_url(href)
                 if url:
                     urls.append(url)
 
-        # Generic fallback: look for property detail links
+        # Strategy 3: generic fallback for buy/sell detail pages using nc_ marker
         if not urls:
-            for a in soup.select('a[href*="suumo.jp"]'):
+            for a in soup.find_all('a', href=True):
                 href = a.get('href', '')
-                # Match individual property pages (contain bc_ or jnc_ or numeric IDs)
-                if href and re.search(r'/(chintai|ms|ikkodate)/(bc_|jnc_|\d+/)', href):
+                if (
+                    href
+                    and '/ichiran/' not in href
+                    and '/jj/' not in href
+                    and '/rooms/' not in href
+                    and 'nc_' in href
+                    and any(f'/{segment}/' in href for segment in buy_segments)
+                ):
                     url = self._normalize_url(href)
                     if url:
                         urls.append(url)

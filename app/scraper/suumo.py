@@ -48,6 +48,8 @@ class PropertyData:
     features: str = ""
     table_data: Dict[str, str] = field(default_factory=dict)
     image_urls: List[str] = field(default_factory=list)
+    video_urls: List[str] = field(default_factory=list)
+    vr_links: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for export.
@@ -81,13 +83,19 @@ class PropertyData:
         for k, v in self.table_data.items():
             if k not in skip and k not in d:
                 d[k] = v
+        if self.video_urls:
+            d['_video_urls'] = self.video_urls
+        if self.vr_links:
+            d['_vr_links'] = self.vr_links
         return d
 
 
 class SuumoScraper:
     """SUUMO Property Information Scraper"""
 
-    SUUMO_URL_PATTERN = re.compile(r'^https?://suumo\.jp/(?:chintai|juhan|ms|ikkodate)/.*')
+    SUUMO_URL_PATTERN = re.compile(
+        r'^https?://suumo\.jp/(?:chintai|juhan|ms|ikkodate|chukoikkodate|tochi|toushi)/.*'
+    )
 
     DEFAULT_HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -155,6 +163,8 @@ class SuumoScraper:
                 features=self._extract_features(soup),
                 table_data=table_data,
                 image_urls=self._extract_image_urls(soup, url),
+                video_urls=self._extract_video_urls(soup),
+                vr_links=self._extract_vr_links(soup),
             )
 
             logger.info(f"Successfully scraped: {url} ({len(data.image_urls)} images)")
@@ -252,6 +262,16 @@ class SuumoScraper:
                 return '、'.join(li.get_text(strip=True) for li in items)
             return tag.get_text(strip=True)
         return ''
+
+    @staticmethod
+    def _normalize_asset_url(url: str) -> str:
+        if not url:
+            return ''
+        if url.startswith('//'):
+            return 'https:' + url
+        if url.startswith('/'):
+            return 'https://suumo.jp' + url
+        return url
 
     # Keys from page form/nav tables that should be excluded
     _JUNK_TABLE_KEYS = {
@@ -362,9 +382,7 @@ class SuumoScraper:
             if src not in seen:
                 seen.add(src)
                 # Ensure https
-                if src.startswith('//'):
-                    src = 'https:' + src
-                urls.append(src)
+                urls.append(self._normalize_asset_url(src))
 
         # Fallback: if no originals found, try with thumbnails
         if not urls:
@@ -374,8 +392,36 @@ class SuumoScraper:
                     if bc_id and bc_id not in src:
                         continue
                     seen.add(src)
-                    if src.startswith('//'):
-                        src = 'https:' + src
-                    urls.append(src)
+                    urls.append(self._normalize_asset_url(src))
 
+        return urls
+
+    def _extract_video_urls(self, soup: BeautifulSoup) -> List[str]:
+        urls: List[str] = []
+        seen = set()
+        for tag in soup.select('video source[src], video[src], iframe[src*="youtube"], iframe[src*="youtu.be"], iframe[src*="video"]'):
+            src = self._normalize_asset_url(tag.get('src') or '')
+            if src and src not in seen:
+                seen.add(src)
+                urls.append(src)
+        for tag in soup.select('[data-video-url], [data-video-src]'):
+            src = self._normalize_asset_url(tag.get('data-video-url') or tag.get('data-video-src') or '')
+            if src and src not in seen:
+                seen.add(src)
+                urls.append(src)
+        return urls
+
+    def _extract_vr_links(self, soup: BeautifulSoup) -> List[str]:
+        urls: List[str] = []
+        seen = set()
+        for tag in soup.select('a[href]'):
+            href = self._normalize_asset_url(tag.get('href', ''))
+            text = self.clean_text(tag.get_text(' ', strip=True))
+            haystack = f'{href} {text}'.lower()
+            if not href:
+                continue
+            if any(token in haystack for token in ('vr', 'パノラマ', 'matterport', '3d', 'virtual')):
+                if href not in seen:
+                    seen.add(href)
+                    urls.append(href)
         return urls

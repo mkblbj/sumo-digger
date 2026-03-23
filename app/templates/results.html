@@ -154,6 +154,22 @@
         return text.replace(/m2/gi, 'm²').replace(/㎡/g, 'm²');
     }
 
+    function renderTags(tags) {
+        const safeTags = Array.isArray(tags) ? tags.filter(Boolean).slice(0, 10) : [];
+        if (!safeTags.length) return '';
+        return `<div class="mt-1 d-flex flex-wrap gap-1">${
+            safeTags.map(tag => `<button type="button" class="badge rounded-pill text-bg-light border property-tag-copy" data-tag="${escapeHtml(String(tag))}" title="点击复制标签">${escapeHtml(String(tag))}</button>`).join('')
+        }</div>`;
+    }
+
+    function formatPriceCell(raw) {
+        if (!raw || raw === '-') return '-';
+        if (typeof CurrencyService === 'undefined' || !CurrencyService.rate) return escapeHtml(String(raw));
+        const parts = CurrencyService.formatParts(String(raw));
+        if (!parts) return escapeHtml(String(raw));
+        return `<div class="fw-semibold">${escapeHtml(parts.jpy || String(raw))}</div>${parts.cny ? `<div class="small text-muted">${escapeHtml(parts.cny)}</div>` : ''}`;
+    }
+
     // ── Task list ──
     async function loadTasks(page) {
         if (page !== undefined) currentPage = page;
@@ -362,7 +378,7 @@
                                 <a href="#" class="prop-detail" data-idx="${i}">${String(name).substring(0, 20)}</a>
                             </div>
                         </td>
-                        <td class="jpy-amount">${rent}</td>
+                        <td class="jpy-amount">${formatPriceCell(rent)}</td>
                         <td>${layout}</td>
                         <td>${area}</td>
                         <td>${String(access).substring(0, 25)}</td>
@@ -375,18 +391,16 @@
                 `;
             }).join('');
 
-            if (typeof CurrencyService !== 'undefined') {
-                await CurrencyService.init();
-                document.querySelectorAll('.jpy-amount').forEach(el => {
-                    el.textContent = CurrencyService.format(el.textContent);
-                });
-            }
+            if (typeof CurrencyService !== 'undefined') await CurrencyService.init();
 
             tbody.querySelectorAll('.prop-detail').forEach(el => {
                 el.addEventListener('click', (e) => { e.preventDefault(); showPropertyDetail(parseInt(el.dataset.idx)); });
             });
             tbody.querySelectorAll('.copy-btn').forEach(el => {
                 el.addEventListener('click', () => copyProperty(parseInt(el.dataset.idx)));
+            });
+            tbody.querySelectorAll('.property-tag-copy').forEach(el => {
+                el.addEventListener('click', () => copyToClipboard(el.dataset.tag || el.textContent || ''));
             });
 
             // Update property pagination
@@ -601,13 +615,14 @@
         const location = getFieldValue(p, ['basic.address'], ['地址', '所在地'], true) || '-';
         const accessRaw = getFieldValue(p, ['detail.access'], ['交通'], true);
         const access1 = Array.isArray(accessRaw) ? accessRaw[0] || '-' : String(accessRaw || '-');
+        const tags = getFieldValue(p, ['basic.tags'], ['物件标签'], true);
         const sectionTables = buildSectionTables(p);
 
         const keyInfoHtml = `
             <div class="row g-2 mb-3">
                 <div class="col-4"><div class="p-2 bg-primary bg-opacity-10 rounded text-center">
                     <small class="text-muted d-block">租金/价格</small>
-                    <strong class="text-primary">${fmtPrice(String(rent))}</strong>
+                    <strong class="text-primary d-block">${formatPriceCell(String(rent))}</strong>
                 </div></div>
                 <div class="col-4"><div class="p-2 bg-light rounded text-center">
                     <small class="text-muted d-block">户型/面积</small>
@@ -628,17 +643,15 @@
             ${keyInfoHtml}
             <!-- AI Summary section -->
             <div class="mb-3 small text-muted" id="aiPrefetchStatus">
-                <span class="spinner-border spinner-border-sm me-1"></span> 正在生成 3 个标题和 3 个描述...
+                <span class="spinner-border spinner-border-sm me-1"></span> 正在生成标题、描述和标签...
             </div>
             <div class="d-none mb-3" id="aiTitleResult">
                 <div class="d-flex align-items-start gap-2">
                     <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
                         <small class="text-muted d-block mb-1"><i class="bi bi-lightbulb"></i> AI 标题</small>
                         <div id="aiTitleText" class="user-select-all" style="cursor:pointer;"></div>
+                        <div id="aiTagList">${renderTags(tags)}</div>
                     </div>
-                    <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-btn" data-target="aiTitleText" title="复制">
-                        <i class="bi bi-clipboard"></i>
-                    </button>
                 </div>
             </div>
             <div class="d-none mb-3" id="aiSummaryResult">
@@ -647,9 +660,6 @@
                         <small class="text-muted d-block mb-1"><i class="bi bi-file-text"></i> AI 简介</small>
                         <div id="aiSummaryText" class="user-select-all" style="cursor:pointer;"></div>
                     </div>
-                    <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-btn" data-target="aiSummaryText" title="复制">
-                        <i class="bi bi-clipboard"></i>
-                    </button>
                 </div>
             </div>
             <div class="d-none alert alert-info py-1 px-2 mb-2 small" id="modalTranslateStatus">
@@ -663,10 +673,9 @@
         `;
         document.getElementById('modalCopyBtn').onclick = () => copyProperty(idx);
 
-        body.querySelectorAll('.ai-copy-btn').forEach(btn => {
+        body.querySelectorAll('.property-tag-copy').forEach(btn => {
             btn.addEventListener('click', () => {
-                const text = document.getElementById(btn.dataset.target)?.textContent;
-                if (text) { copyToClipboard(text).then(() => showCopyToast(text)); }
+                copyToClipboard(btn.dataset.tag || btn.textContent || '');
             });
         });
 
@@ -696,8 +705,30 @@
         if (!target || !textEl) return;
         target.classList.toggle('d-none', safeItems.length === 0);
         textEl.innerHTML = safeItems
-            .map((item, idx) => `<div class="mb-2 p-2 border rounded bg-white"><strong>${idx + 1}.</strong> ${escapeHtml(String(item))}</div>`)
+            .map((item, idx) => `
+                <div class="mb-2 p-2 border rounded bg-white d-flex align-items-start gap-2">
+                    <div class="flex-grow-1"><strong>${idx + 1}.</strong> ${escapeHtml(String(item))}</div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary ai-copy-item" data-text="${escapeHtml(String(item))}" title="复制这一条">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                </div>
+            `)
             .join('');
+        textEl.querySelectorAll('.ai-copy-item').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const text = btn.dataset.text || '';
+                if (text) copyToClipboard(text).then(() => showCopyToast(text));
+            });
+        });
+    }
+
+    function renderAiTags(items) {
+        const tagEl = document.getElementById('aiTagList');
+        if (!tagEl) return;
+        tagEl.innerHTML = renderTags(items);
+        tagEl.querySelectorAll('.property-tag-copy').forEach(btn => {
+            btn.addEventListener('click', () => copyToClipboard(btn.dataset.tag || btn.textContent || ''));
+        });
     }
 
     async function preloadDetailAssets(propertyId, idx) {
@@ -714,6 +745,7 @@
             renderModal(currentProperties[idx], idx);
             renderAiItems('aiTitleResult', 'aiTitleText', data.title_items || []);
             renderAiItems('aiSummaryResult', 'aiSummaryText', data.summary_items || []);
+            renderAiTags(data.tag_items || []);
             const doneStatus = document.getElementById('aiPrefetchStatus');
             if (doneStatus) doneStatus.classList.add('d-none');
         } catch (e) {

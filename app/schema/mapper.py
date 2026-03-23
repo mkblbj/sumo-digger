@@ -42,6 +42,8 @@ _JP_KEY_MAP: Dict[str, str] = {
     '面積': 'basic.area',
     '土地面積': 'basic.land_area',
     '建物面積': 'basic.building_area',
+    '延べ面積': 'building.total_area',
+    '延床面積': 'building.total_area',
     '建物種別': 'detail.sub_type',
     '築年月': 'basic.built_month',
     '築年数': 'basic.built_month',
@@ -69,6 +71,9 @@ _JP_KEY_MAP: Dict[str, str] = {
     '設備・条件': 'amenities.facilities',
     '駐車場': 'detail.parking',
     '総戸数': 'detail.total_units',
+    '総棟数': 'building.total_units',
+    '総区画数': 'detail.total_lots',
+    '区画数': 'detail.total_lots',
     '建ぺい率': 'land.building_coverage_pct',
     '容積率': 'land.far_pct',
     '用途地域': 'land.zoning',
@@ -80,6 +85,13 @@ _JP_KEY_MAP: Dict[str, str] = {
     '管理会社': 'management.company',
     '施工会社': 'building.constructor',
     '施工': 'building.constructor',
+    'リフォーム': 'building.renovation',
+    'リノベーション': 'building.renovation',
+    '耐震構造': 'building.seismic_type',
+    '耐震': 'building.seismic_type',
+    '法令上の制限': 'land.restrictions',
+    'その他制限事項': 'land.restrictions',
+    '制限事項': 'land.restrictions',
     '販売価格（税込）': 'basic.price_jpy',
     '售价（日元）': 'basic.price_jpy',
     '物件价格': 'analysis.property_price',
@@ -87,6 +99,9 @@ _JP_KEY_MAP: Dict[str, str] = {
     '専有面積（壁芯）': 'detail.exclusive_area',
     '专有面积': 'detail.exclusive_area',
     'バルコニー面積': 'detail.other_areas',
+    'テラス面積': 'detail.other_areas',
+    'ルーフバルコニー面積': 'detail.other_areas',
+    '専用庭面積': 'detail.other_areas',
     '阳台面积': 'detail.other_areas',
     '所在楼层': 'detail.floor',
     '总楼层': 'detail.total_floors',
@@ -100,6 +115,8 @@ _JP_KEY_MAP: Dict[str, str] = {
     '都市計画': '_raw.city_plan',
     '接道状況': '_raw.road_access',
     'セットバック': '_raw.setback',
+    '利回り': 'basic.estimated_roi_pct',
+    '想定利回り': 'basic.estimated_roi_pct',
     '物件番号': '_raw.property_number',
     'SUUMO物件コード': '_raw.suumo_code',
     '情報公開日': '_raw.publish_date',
@@ -242,12 +259,12 @@ def detect_property_type(url: str = '', raw_data: Optional[Dict] = None) -> Prop
         return PropertyType.RENTAL
     if '/tochi/' in url or '/land/' in url:
         return PropertyType.LAND
+    if '/toushi/' in url or '/invest/' in url:
+        return PropertyType.INVESTMENT
     if '/ms/' in url:
         return PropertyType.MANSION
     if '/ikkodate/' in url:
         return PropertyType.HOUSE
-    if '/toushi/' in url or '/invest/' in url:
-        return PropertyType.INVESTMENT
 
     # Data-based detection
     if raw_data:
@@ -295,8 +312,9 @@ class FieldMapper:
         present (missing ones set to None).
         """
         mapped = self._map_keys(raw_data, property_type)
-        mapped = self._convert_enums(mapped)
+        mapped = self._convert_enums(mapped, property_type)
         mapped = self._convert_layout(mapped)
+        mapped = self._normalize_special_fields(mapped)
         mapped = self._clean_numbers(mapped, property_type)
         mapped = self._assemble_access(mapped, raw_data)
         mapped = self._extract_city_ward(mapped)
@@ -331,12 +349,28 @@ class FieldMapper:
             images = raw.get('_image_urls') or raw.get('物件画像')
             if images:
                 result['media.images'] = images
+        if 'media.videos' not in result:
+            videos = raw.get('_video_urls')
+            if videos:
+                result['media.videos'] = videos
+        if 'media.vr_links' not in result:
+            vr_links = raw.get('_vr_links')
+            if vr_links:
+                result['media.vr_links'] = vr_links
+
+        facilities = result.get('amenities.facilities')
+        if isinstance(facilities, str):
+            result['amenities.facilities'] = [
+                item.strip()
+                for item in re.split(r'[、,，/\n]+', facilities)
+                if item and item.strip()
+            ]
 
         return result
 
     # ── Step 2: Convert enum values ──────────────────────────────────
 
-    def _convert_enums(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _convert_enums(self, data: Dict[str, Any], ptype: PropertyType) -> Dict[str, Any]:
         _enum_fields = {
             'detail.structure': (E.STRUCTURE_JP_MAP, E.STRUCTURE),
             'detail.orientation': (E.ORIENTATION_JP_MAP, E.ORIENTATION),
@@ -346,12 +380,19 @@ class FieldMapper:
             'building.seismic_type': (E.SEISMIC_JP_MAP, E.SEISMIC_TYPE),
             'management.method': (E.MANAGEMENT_METHOD_JP_MAP, E.MANAGEMENT_METHOD),
             'detail.property_status': (E.PROPERTY_STATUS_JP_MAP, E.PROPERTY_STATUS),
-            'detail.land_or_invest_status': (E.LAND_STATUS_JP_MAP, E.LAND_STATUS),
             'detail.transaction_form': (E.TRANSACTION_FORM_JP_MAP, E.TRANSACTION_FORM),
+            'detail.sub_type': (E.SUB_TYPE_JP_MAP, E.SUB_TYPE_ALL),
         }
         for key, (jp_map, valid) in _enum_fields.items():
             if key in data and data[key]:
                 data[key] = _map_enum(str(data[key]), jp_map, valid)
+        if 'detail.land_or_invest_status' in data and data['detail.land_or_invest_status']:
+            valid = E.INVESTMENT_STATUS if ptype == PropertyType.INVESTMENT else E.LAND_STATUS
+            data['detail.land_or_invest_status'] = _map_enum(
+                str(data['detail.land_or_invest_status']),
+                E.LAND_OR_INVEST_STATUS_JP_MAP,
+                valid,
+            )
         return data
 
     # ── Step 3: Convert layout ───────────────────────────────────────
@@ -359,6 +400,24 @@ class FieldMapper:
     def _convert_layout(self, data: Dict[str, Any]) -> Dict[str, Any]:
         if 'basic.layout_cn' in data and data['basic.layout_cn']:
             data['basic.layout_cn'] = convert_layout(str(data['basic.layout_cn']))
+        return data
+
+    def _normalize_special_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        other_areas = data.get('detail.other_areas')
+        if isinstance(other_areas, str):
+            parsed_areas = []
+            for chunk in re.split(r'[\n、]+', other_areas):
+                text = chunk.strip()
+                if not text:
+                    continue
+                num = clean_number(text)
+                name = re.sub(r'[:：]?\s*[\d.,]+\s*(?:㎡|m²|m2)?', '', text).strip() or '其他面积'
+                item: Dict[str, Any] = {'name': name}
+                if num is not None:
+                    item['area'] = num
+                parsed_areas.append(item)
+            if parsed_areas:
+                data['detail.other_areas'] = parsed_areas
         return data
 
     # ── Step 4: Clean numeric values ─────────────────────────────────

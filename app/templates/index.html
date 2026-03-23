@@ -8,16 +8,11 @@
             <p class="text-muted" data-i18n="app.subtitle">从SUUMO抓取房产信息，浏览、翻译、导出</p>
         </div>
 
-        <!-- Tabs: Manual / Search / Favorites -->
+        <!-- Tabs: Smart Input / Favorites -->
         <ul class="nav nav-pills nav-fill mb-3" id="inputTabs" role="tablist">
             <li class="nav-item" role="presentation">
                 <button class="nav-link active" id="manual-tab" data-bs-toggle="tab" data-bs-target="#manual" type="button">
-                    <i class="bi bi-link-45deg"></i> <span data-i18n="tab.manual">URL输入</span>
-                </button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="search-tab" data-bs-toggle="tab" data-bs-target="#searchPane" type="button">
-                    <i class="bi bi-geo-alt"></i> <span data-i18n="tab.search">搜索页批量</span>
+                    <i class="bi bi-magic"></i> <span>智能输入</span>
                 </button>
             </li>
             <li class="nav-item" role="presentation">
@@ -28,15 +23,20 @@
         </ul>
 
         <div class="tab-content" id="inputTabsContent">
-            <!-- Manual URL input -->
+            <!-- Smart input -->
             <div class="tab-pane fade show active" id="manual" role="tabpanel">
                 <textarea class="form-control mb-2" id="urlInput" rows="4"
-                    placeholder="每行输入一个SUUMO物件URL&#10;https://suumo.jp/chintai/jnc_.../?bc=...&#10;https://suumo.jp/ms/..."></textarea>
+                    placeholder="每行输入一个 SUUMO 链接，支持物件详情页和搜索结果页混合粘贴&#10;https://suumo.jp/chintai/jnc_.../?bc=...&#10;https://suumo.jp/jj/bukken/ichiran/...&#10;https://suumo.jp/ms/..."></textarea>
                 <div class="d-flex justify-content-between align-items-center mb-3">
-                    <small class="text-muted" id="urlCount">0 URL</small>
+                    <div>
+                        <small class="text-muted d-block" id="urlCount">0 URL</small>
+                        <small class="text-muted" id="smartUrlStats">物件URL 0 条 | 搜索页URL 0 条 | 无效 0 条</small>
+                    </div>
                     <div class="d-flex gap-2 align-items-center">
                         <label class="text-muted small mb-0" data-i18n="options.delay">间隔(秒)</label>
                         <input type="number" class="form-control form-control-sm" id="delayInput" value="2" min="1" max="10" style="width:65px;">
+                        <label class="text-muted small mb-0" id="maxResultsLabel">搜索最大条数</label>
+                        <input type="number" class="form-control form-control-sm" id="maxResultsInput" value="100" min="1" max="1000" style="width:90px;">
                         <button class="btn btn-sm btn-outline-secondary" id="clearUrls">
                             <i class="bi bi-x-circle"></i>
                         </button>
@@ -44,29 +44,6 @@
                 </div>
                 <button class="btn btn-primary w-100 btn-lg" id="startScrapeBtn">
                     <i class="bi bi-play-fill"></i> <span data-i18n="action.start">开始爬取</span>
-                </button>
-            </div>
-
-            <!-- Search batch -->
-            <div class="tab-pane fade" id="searchPane" role="tabpanel">
-                <input type="text" class="form-control mb-2" id="searchUrlInput"
-                    placeholder="粘贴SUUMO搜索结果页URL  https://suumo.jp/jj/chintai/ichiran/...">
-                <div class="row g-2 mb-3">
-                    <div class="col">
-                        <div class="input-group input-group-sm">
-                            <span class="input-group-text" data-i18n="search.maxResults">最大条数</span>
-                            <input type="number" class="form-control" id="maxResultsInput" value="100" min="1" max="1000">
-                        </div>
-                    </div>
-                    <div class="col">
-                        <div class="input-group input-group-sm">
-                            <span class="input-group-text" data-i18n="options.delay">间隔(秒)</span>
-                            <input type="number" class="form-control" id="searchDelayInput" value="2" min="1" max="10">
-                        </div>
-                    </div>
-                </div>
-                <button class="btn btn-primary w-100 btn-lg" id="startSearchScrapeBtn">
-                    <i class="bi bi-play-fill"></i> <span data-i18n="search.start">开始批量爬取</span>
                 </button>
             </div>
 
@@ -142,10 +119,10 @@
 <script>
     let currentTaskId = null;
     let eventSource = null;
-    let scrapeMode = 'manual'; // 'manual' | 'search'
 
     const urlInput = document.getElementById('urlInput');
     const urlCount = document.getElementById('urlCount');
+    const smartUrlStats = document.getElementById('smartUrlStats');
     const startScrapeBtn = document.getElementById('startScrapeBtn');
     const progressCard = document.getElementById('progressCard');
     const progressBar = document.getElementById('progressBar');
@@ -154,57 +131,54 @@
     const errorCard = document.getElementById('errorCard');
     const errorText = document.getElementById('errorText');
     const errorList = document.getElementById('errorList');
+    const maxResultsInput = document.getElementById('maxResultsInput');
+
+    function isSearchUrl(url) {
+        return /^https?:\/\/suumo\.jp\/(jj\/(?:chintai|bukken)\/ichiran\/|ms\/shinchiku\/|ms\/chuko\/|ikkodate\/|chukoikkodate\/|tochi\/|toushi\/)/.test(url);
+    }
+
+    function isDetailUrl(url) {
+        return /^https?:\/\/suumo\.jp\/(?:chintai|juhan|ms|ikkodate|chukoikkodate|tochi|toushi)\//.test(url) && !isSearchUrl(url);
+    }
 
     // URL count
     urlInput.addEventListener('input', updateUrlCount);
     function updateUrlCount() {
-        const n = urlInput.value.split('\n').filter(u => u.trim()).length;
+        const urls = urlInput.value.split('\n').map(u => u.trim()).filter(Boolean);
+        const n = urls.length;
+        let detailCount = 0;
+        let searchCount = 0;
+        let invalidCount = 0;
+        urls.forEach(url => {
+            if (isSearchUrl(url)) searchCount += 1;
+            else if (isDetailUrl(url)) detailCount += 1;
+            else invalidCount += 1;
+        });
         urlCount.textContent = `${n} URL`;
+        smartUrlStats.textContent = `物件URL ${detailCount} 条 | 搜索页URL ${searchCount} 条 | 无效 ${invalidCount} 条`;
+        maxResultsInput.disabled = searchCount === 0;
     }
     document.getElementById('clearUrls').addEventListener('click', () => { urlInput.value = ''; updateUrlCount(); });
+    updateUrlCount();
 
-    // ── Manual scrape ──
+    // ── Smart scrape ──
     startScrapeBtn.addEventListener('click', async () => {
         const urls = urlInput.value.split('\n').map(u => u.trim()).filter(Boolean);
         const delay = parseInt(document.getElementById('delayInput').value) || 2;
+        const maxResults = parseInt(maxResultsInput.value) || 100;
         if (!urls.length) { alert(i18n.t('error.noUrl')); return; }
 
-        scrapeMode = 'manual';
         beginProgress();
         try {
             const res = await fetch('/api/scrape', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ urls, delay })
+                body: JSON.stringify({ urls, delay, max_results: maxResults })
             });
             const data = await res.json();
             if (res.ok) { currentTaskId = data.task_id; connectSSE(data.task_id); }
             else { showError(data.error || 'Failed'); }
         } catch (e) { showError(i18n.t('error.network')); }
-    });
-
-    // ── Search batch scrape (fire-and-forget, runs in background) ──
-    document.getElementById('startSearchScrapeBtn').addEventListener('click', async () => {
-        const searchUrl = document.getElementById('searchUrlInput').value.trim();
-        const maxResults = parseInt(document.getElementById('maxResultsInput').value) || 100;
-        const delay = parseInt(document.getElementById('searchDelayInput').value) || 2;
-        if (!searchUrl) { alert('Please enter a search URL'); return; }
-
-        const btn = document.getElementById('startSearchScrapeBtn');
-        btn.disabled = true;
-        try {
-            const res = await fetch('/api/search/scrape', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ search_url: searchUrl, max_results: maxResults, delay })
-            });
-            const data = await res.json();
-            if (res.ok) {
-                // Show success toast — task runs in background
-                showBatchStarted(data.task_id, maxResults);
-            } else { showError(data.error || 'Failed'); }
-        } catch (e) { showError(i18n.t('error.network')); }
-        btn.disabled = false;
     });
 
     // ── Favorites ──
@@ -236,7 +210,6 @@
     // ── SSE + Progress ──
     function beginProgress() {
         startScrapeBtn.disabled = true;
-        document.getElementById('startSearchScrapeBtn').disabled = true;
         progressCard.classList.remove('d-none');
         errorCard.classList.add('d-none');
         document.getElementById('inlineResults').classList.add('d-none');
@@ -273,7 +246,11 @@
         const pct = d.total ? Math.round((d.progress / d.total) * 100) : 0;
         progressBar.style.width = `${pct}%`;
         progressBar.textContent = `${pct}%`;
-        progressText.textContent = i18n.t('progress.processing', { current: d.progress, total: d.total });
+        if (d.phase === 'collecting') {
+            progressText.textContent = d.current_url || '正在收集搜索结果...';
+        } else {
+            progressText.textContent = i18n.t('progress.processing', { current: d.progress, total: d.total });
+        }
         if (d.current_url) currentUrlEl.textContent = d.current_url.length > 60 ? d.current_url.substring(0, 60) + '...' : d.current_url;
         if (d.errors && d.errors.length) {
             errorCard.classList.remove('d-none');
@@ -286,15 +263,7 @@
 
     async function onComplete() {
         startScrapeBtn.disabled = false;
-        document.getElementById('startSearchScrapeBtn').disabled = false;
 
-        // Batch search → redirect to results page
-        if (scrapeMode === 'search') {
-            window.location.href = `/results?task=${currentTaskId}`;
-            return;
-        }
-
-        // Manual scrape → show inline results
         progressCard.classList.add('d-none');
         await showInlineResults(currentTaskId);
     }
@@ -483,6 +452,7 @@
         const accessRaw = getFieldValue(p, ['detail.access'], ['交通'], true);
         const access1 = Array.isArray(accessRaw) ? accessRaw[0] || '-' : String(accessRaw || '-');
         const location = getFieldValue(p, ['basic.address'], ['地址', '所在地'], true) || '-';
+        const tags = getFieldValue(p, ['basic.tags'], ['物件标签'], true);
 
         const formatPrice = (txt) => {
             if (!txt || txt === '-' || typeof CurrencyService === 'undefined' || !CurrencyService.rate) return txt;
@@ -524,6 +494,8 @@
             return `<div class="mb-3"><h6 class="border-bottom pb-1 mb-2">${escapeHtml(section.name)}</h6><table class="table table-sm table-bordered mb-0"><tbody>${rows}</tbody></table></div>`;
         }).join('');
 
+        const tagHtml = renderTagBadges(tags);
+
         return `
         <div class="card mb-4 shadow-sm">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -542,15 +514,15 @@
                 ${keyInfoHtml}
                 <!-- AI Summary results -->
                 <div class="small text-muted mb-3 ai-prefetch-status" data-idx="${idx}">
-                    <span class="spinner-border spinner-border-sm me-1"></span> 正在生成 3 个标题和 3 个描述...
+                    <span class="spinner-border spinner-border-sm me-1"></span> 正在生成标题、简介和标签...
                 </div>
                 <div class="d-none mb-3 ai-title-result" data-idx="${idx}">
                     <div class="d-flex align-items-start gap-2">
                         <div class="flex-grow-1 bg-warning bg-opacity-10 rounded p-2">
                             <small class="text-muted d-block mb-1"><i class="bi bi-lightbulb"></i> AI 标题</small>
                             <div class="ai-title-text user-select-all" style="cursor:pointer;"></div>
+                            <div class="property-tags mt-2">${tagHtml}</div>
                         </div>
-                        <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-title" data-idx="${idx}" title="复制"><i class="bi bi-clipboard"></i></button>
                     </div>
                 </div>
                 <div class="d-none mb-3 ai-summary-result" data-idx="${idx}">
@@ -559,7 +531,6 @@
                             <small class="text-muted d-block mb-1"><i class="bi bi-file-text"></i> AI 简介</small>
                             <div class="ai-summary-text user-select-all" style="cursor:pointer;"></div>
                         </div>
-                        <button class="btn btn-sm btn-outline-secondary flex-shrink-0 ai-copy-summary" data-idx="${idx}" title="复制"><i class="bi bi-clipboard"></i></button>
                     </div>
                 </div>
                 ${sectionTables}
@@ -624,6 +595,14 @@
         copyToClipboard(text);
     }
 
+    function renderTagBadges(tags) {
+        const safeTags = Array.isArray(tags) ? tags.filter(Boolean).slice(0, 10) : [];
+        if (!safeTags.length) return '';
+        return safeTags
+            .map(tag => `<button type="button" class="badge rounded-pill text-bg-light border me-1 mb-1 property-tag-copy" data-tag="${escapeHtml(String(tag))}" title="点击复制标签">${escapeHtml(String(tag))}</button>`)
+            .join('');
+    }
+
     function showBatchStarted(taskId, maxResults) {
         document.getElementById('batchStartedCard').classList.remove('d-none');
         document.getElementById('batchStartedText').textContent = `最多 ${maxResults} 条，后台爬取中...`;
@@ -660,29 +639,32 @@
     }
 
     function attachAiHandlers(container) {
-        container.querySelectorAll('.ai-copy-title').forEach(btn => {
+        container.querySelectorAll('.ai-copy-item').forEach(btn => {
             btn.addEventListener('click', () => {
-                const idx = btn.dataset.idx;
-                const el = btn.closest('.card')?.querySelector('.ai-title-text');
-                if (el) navigator.clipboard.writeText(el.textContent);
+                const text = btn.dataset.text || '';
+                if (text) navigator.clipboard.writeText(text);
             });
         });
-        container.querySelectorAll('.ai-copy-summary').forEach(btn => {
+        container.querySelectorAll('.property-tag-copy').forEach(btn => {
             btn.addEventListener('click', () => {
-                const el = btn.closest('.card')?.querySelector('.ai-summary-text');
-                if (el) navigator.clipboard.writeText(el.textContent);
+                const tag = btn.dataset.tag || btn.textContent || '';
+                if (tag) navigator.clipboard.writeText(tag);
             });
         });
     }
 
     function attachAiHandlersForCard(card) {
-        card.querySelector('.ai-copy-title')?.addEventListener('click', function() {
-            const el = card.querySelector('.ai-title-text');
-            if (el) navigator.clipboard.writeText(el.textContent);
+        card.querySelectorAll('.ai-copy-item').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const text = btn.dataset.text || '';
+                if (text) navigator.clipboard.writeText(text);
+            });
         });
-        card.querySelector('.ai-copy-summary')?.addEventListener('click', function() {
-            const el = card.querySelector('.ai-summary-text');
-            if (el) navigator.clipboard.writeText(el.textContent);
+        card.querySelectorAll('.property-tag-copy').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const tag = btn.dataset.tag || btn.textContent || '';
+                if (tag) navigator.clipboard.writeText(tag);
+            });
         });
         bindOriginalTextToggles(card);
     }
@@ -694,9 +676,24 @@
         if (resultEl) resultEl.classList.toggle('d-none', safeItems.length === 0);
         if (textEl) {
             textEl.innerHTML = safeItems
-                .map((item, idx) => `<div class="mb-2 p-2 border rounded bg-white"><strong>${idx + 1}.</strong> ${escapeHtml(String(item))}</div>`)
+                .map((item, idx) => `
+                    <div class="mb-2 p-2 border rounded bg-white d-flex align-items-start gap-2">
+                        <div class="flex-grow-1"><strong>${idx + 1}.</strong> ${escapeHtml(String(item))}</div>
+                        <button type="button" class="btn btn-sm btn-outline-secondary ai-copy-item" data-text="${escapeHtml(String(item))}" title="复制这一条">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                    </div>
+                `)
                 .join('');
         }
+        attachAiHandlersForCard(card);
+    }
+
+    function renderTagItemsForCard(card, items) {
+        const container = card.querySelector('.property-tags');
+        if (!container) return;
+        container.innerHTML = renderTagBadges(items);
+        attachAiHandlersForCard(card);
     }
 
     async function prefetchCardAssets(container, properties, i) {
@@ -722,12 +719,14 @@
                 if (nextCard) {
                     renderAiItemsForCard(nextCard, 'title', data.title_items || []);
                     renderAiItemsForCard(nextCard, 'summary', data.summary_items || []);
+                    renderTagItemsForCard(nextCard, data.tag_items || []);
                     nextCard.querySelector('.ai-prefetch-status')?.classList.add('d-none');
                 }
                 return;
             }
             renderAiItemsForCard(card, 'title', data.title_items || []);
             renderAiItemsForCard(card, 'summary', data.summary_items || []);
+            renderTagItemsForCard(card, data.tag_items || []);
             card.querySelector('.ai-prefetch-status')?.classList.add('d-none');
         } catch (e) {
             console.error('AI prefetch error:', e);
@@ -774,7 +773,6 @@
 
     function showError(msg) {
         startScrapeBtn.disabled = false;
-        document.getElementById('startSearchScrapeBtn').disabled = false;
         progressCard.classList.add('d-none');
         errorCard.classList.remove('d-none');
         errorText.textContent = msg;

@@ -8,7 +8,8 @@ import json
 import zipfile
 import logging
 import threading
-from typing import Generator, Dict, Any
+import re
+from typing import Generator, Dict, Any, List
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -27,6 +28,7 @@ from app.scraper.auth import SuumoAuthError, get_favorites_with_login
 from app.exporters.exporter import DataExporter, ExportError
 from app.schema.property_types import PropertyType
 from app.schema.mapper import FieldMapper, detect_property_type
+from app.schema.field_definitions import get_key_to_label
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,87 @@ _progress_lock = threading.Lock()
 # Validation constants
 MIN_DELAY = 1
 MAX_DELAY = 10
+MAX_SEARCH_RESULTS = 1000
+_JAPANESE_KANA_RE = re.compile(r'[\u3040-\u30ff]')
+
+
+def _classify_urls(urls: List[str]) -> tuple[list[str], list[str], list[str]]:
+    detail_urls: List[str] = []
+    search_urls: List[str] = []
+    invalid_urls: List[str] = []
+    for raw_url in urls:
+        url = raw_url.strip()
+        if not url:
+            continue
+        if SuumoSearchParser.is_search_url(url):
+            search_urls.append(url)
+        elif SuumoScraper.validate_url(url) or BuyScraper.is_buy_url(url):
+            detail_urls.append(url)
+        else:
+            invalid_urls.append(url)
+    return detail_urls, search_urls, invalid_urls
+
+
+def _resolve_property_type(data: Dict[str, Any]) -> PropertyType:
+    ptype_str = data.get('_property_type', '')
+    for pt in PropertyType:
+        if pt.value == ptype_str:
+            return pt
+    return PropertyType.OTHER
+
+
+def _build_llm_prop_text(data: Dict[str, Any]) -> str:
+    skip = {
+        '_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL', '物件画像',
+        'media.images', 'media.videos', 'media.vr_links', 'ai.description_candidates',
+        'poi.schools', 'poi.business_districts', 'poi.parks',
+    }
+    ptype = _resolve_property_type(data)
+    label_map = get_key_to_label(ptype)
+    lines = []
+    for key, value in data.items():
+        if key in skip or key.startswith('_') or value in (None, '', [], {}):
+            continue
+        label = label_map.get(key, key)
+        lines.append(f'{label}: {value}')
+    return '\n'.join(lines[:40])
+
+
+def _summary_cache_config(summary_type: str) -> tuple[str, int]:
+    if summary_type == 'title':
+        return 'basic.property_name', 3
+    if summary_type == 'summary':
+        return 'ai.description_candidates', 3
+    if summary_type == 'tags':
+        return 'basic.tags', 5
+    raise ValueError('Unsupported summary type')
+
+
+def _normalize_summary_items(items: Any, limit: int) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    for item in items if isinstance(items, list) else [items]:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def _needs_chinese_retry(items: List[str]) -> bool:
+    return any(len(_JAPANESE_KANA_RE.findall(item)) >= 3 for item in items)
+
+
+def _get_enrichment_service():
+    settings = Settings.get()
+    if not settings.llm_api_key:
+        return None
+    from app.services.ai_enrichment import AIEnrichmentService
+    from app.services.llm_client import get_llm_client
+    return AIEnrichmentService(llm_client=get_llm_client(settings))
 
 
 # ==================== Main Pages ====================
@@ -73,13 +156,14 @@ def settings_page():
 
 @api_bp.route('/scrape', methods=['POST'])
 def start_scrape():
-    """Start scraping"""
+    """Start scraping detail URLs and/or search result URLs."""
     data = request.get_json()
     if not data or 'urls' not in data:
         return jsonify({'error': 'URL is not specified'}), 400
 
     urls = data.get('urls', [])
     delay = data.get('delay', 2)
+    max_results = data.get('max_results', 100)
 
     # Validate delay parameter
     try:
@@ -90,6 +174,12 @@ def start_scrape():
             }), 400
     except (TypeError, ValueError):
         delay = 2
+
+    try:
+        max_results = int(max_results)
+        max_results = max(1, min(max_results, MAX_SEARCH_RESULTS))
+    except (TypeError, ValueError):
+        max_results = 100
 
     # Filter empty URLs
     urls = [url.strip() for url in urls if url and url.strip()]
@@ -104,16 +194,19 @@ def start_scrape():
             'error': f'Maximum {max_urls} URLs allowed, got {len(urls)}'
         }), 400
 
-    # Validate URLs (accept both rental and buy URLs)
-    invalid_urls = [url for url in urls if not SuumoScraper.validate_url(url) and not BuyScraper.is_buy_url(url)]
+    detail_urls, search_urls, invalid_urls = _classify_urls(urls)
     if invalid_urls:
         return jsonify({
             'error': 'Invalid URLs included',
             'invalid_urls': invalid_urls
         }), 400
 
-    # Detect property type from first URL
-    property_type = 'buy' if any(BuyScraper.is_buy_url(u) for u in urls) else 'rental'
+    if search_urls and detail_urls:
+        property_type = 'mixed'
+    elif search_urls:
+        property_type = 'search'
+    else:
+        property_type = 'buy' if any(BuyScraper.is_buy_url(u) for u in detail_urls) else 'rental'
 
     # Generate task ID and persist to DB
     task_id = str(uuid.uuid4())
@@ -130,13 +223,16 @@ def start_scrape():
     # Initialize in-memory progress
     with _progress_lock:
         _progress[task_id] = {
-            'status': 'pending',
-            'urls': urls,
+            'status': 'collecting' if search_urls else 'pending',
+            'urls': detail_urls,
+            'search_urls': search_urls,
+            'max_results': max_results,
             'delay': delay,
             'progress': 0,
-            'total': len(urls),
+            'total': len(detail_urls) if detail_urls and not search_urls else 0,
             'current_url': '',
             'errors': [],
+            'phase': 'collecting' if search_urls else 'scraping',
         }
 
     # Run scraping in background
@@ -147,7 +243,8 @@ def start_scrape():
 
     return jsonify({
         'task_id': task_id,
-        'total': len(urls)
+        'total': len(detail_urls),
+        'search_count': len(search_urls)
     })
 
 
@@ -189,6 +286,7 @@ def scrape_stream(task_id: str):
                 data = {
                     'type': 'progress',
                     'status': prog['status'],
+                    'phase': prog.get('phase', 'scraping'),
                     'progress': prog['progress'],
                     'total': prog['total'],
                     'current_url': prog['current_url'],
@@ -221,6 +319,7 @@ def scrape_status(task_id: str):
         prog = _progress[task_id]
         return jsonify({
             'status': prog['status'],
+            'phase': prog.get('phase', 'scraping'),
             'progress': prog['progress'],
             'total': prog['total'],
             'current_url': prog['current_url'],
@@ -235,6 +334,7 @@ def scrape_status(task_id: str):
 
     return jsonify({
         'status': task.status,
+        'phase': 'completed' if task.status == 'completed' else '',
         'progress': task.total,
         'total': task.total,
         'current_url': '',
@@ -295,12 +395,7 @@ def start_search_scrape():
 
     task_id = str(uuid.uuid4())
 
-    task = ScrapingTask(
-        id=task_id,
-        status='pending',
-        property_type='search',
-        total=0,  # Will be updated after URL collection
-    )
+    task = ScrapingTask(id=task_id, status='pending', property_type='search', total=0)
     db.session.add(task)
     db.session.commit()
 
@@ -308,19 +403,18 @@ def start_search_scrape():
         _progress[task_id] = {
             'status': 'collecting',
             'urls': [],
+            'search_urls': [search_url],
+            'max_results': max_results,
             'delay': delay,
             'progress': 0,
             'total': 0,
             'current_url': '',
             'errors': [],
-            'phase': 'collecting',  # collecting -> scraping
+            'phase': 'collecting',
         }
 
     app = current_app._get_current_object()
-    thread = threading.Thread(
-        target=run_search_scrape_task,
-        args=(app, task_id, search_url, max_results, delay)
-    )
+    thread = threading.Thread(target=run_scraping_task, args=(app, task_id))
     thread.daemon = True
     thread.start()
 
@@ -479,7 +573,7 @@ def validate_urls():
     for url in urls:
         url = url.strip() if url else ''
         if url:
-            if SuumoScraper.validate_url(url):
+            if SuumoSearchParser.is_search_url(url) or SuumoScraper.validate_url(url) or BuyScraper.is_buy_url(url):
                 valid.append(url)
             else:
                 invalid.append(url)
@@ -625,30 +719,52 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
         raise ValueError('LLM API not configured')
 
     data = prop.data
-    skip = {'_id', '_url', '_has_translation', '_image_urls', '_translated', 'URL', '物件画像'}
-    prop_text = '\n'.join(f'{k}: {v}' for k, v in data.items() if k not in skip and v)
+    cache_key, min_count = _summary_cache_config(summary_type)
+    cached = data.get(cache_key)
+    if isinstance(cached, list) and len([v for v in cached if str(v).strip()]) >= min_count:
+        return cached[:10] if summary_type == 'tags' else cached[:3]
+
+    prop_text = _build_llm_prop_text(data)
+    ptype = _resolve_property_type(data)
 
     if summary_type == 'title':
+        templates = {
+            PropertyType.RENTAL: '地区 + 特点 + 租房 + 户型 + 类型 + 特点短句',
+            PropertyType.MANSION: '地区 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
+            PropertyType.HOUSE: '地区 + 特点 + 户型 + 一户建 + 特点短句',
+            PropertyType.LAND: '地区 + 特点 + 土地面积 + 土地 + 特点短句',
+            PropertyType.INVESTMENT: '地区 + 特点 + 户型/类型 + 投资物件 + 特点短句',
+            PropertyType.OTHER: '地区 + 特点 + 物件类型 + 特点短句',
+        }
         system = (
-            "你是日本房产信息编辑。根据物件信息生成3个适合中国客户阅读的中文标题候选。\n"
+            "你是日本房产信息编辑。必须使用简体中文生成 3 个适合中国客户阅读的标题候选。\n"
             "规则：\n"
             "- 返回 JSON 数组，例如 [\"标题1\", \"标题2\", \"标题3\"]\n"
             "- 每个标题 20-40 字左右，不要标点符号\n"
-            "- 包含：地区/站名 + 户型 + 核心卖点\n"
-            "- 地名/站名保留日文\n"
+            f"- 优先遵循格式：{templates.get(ptype, templates[PropertyType.OTHER])}\n"
+            "- 地名/站名可保留日文，但标题主体严禁使用日语假名\n"
             "- 不要返回解释文字"
         )
+        limit = 3
+    elif summary_type == 'tags':
+        system = (
+            "你是日本房产信息编辑。必须使用简体中文输出。\n"
+            "请基于物件信息生成 5-10 个左右房源标签，每个标签 2-4 个字。\n"
+            "标签主体严禁使用日语假名，只输出 JSON 数组。"
+        )
+        limit = 10
     else:
         system = (
-            "你是日本房产信息编辑。根据物件信息写3个版本的简体中文介绍短文。\n"
+            "你是日本房产信息编辑。根据物件信息写 3 个版本的简体中文介绍短文。\n"
             "规则：\n"
             "- 返回 JSON 数组，例如 [\"版本1\", \"版本2\", \"版本3\"]\n"
-            "- 每个版本 120-220 字\n"
+            "- 每个版本 200-300 字\n"
             "- 涵盖：位置交通、房屋基本情况、费用、设备亮点\n"
-            "- 地名/站名保留日文原文\n"
+            "- 地名/站名可保留日文原文，其他文字必须为简体中文\n"
             "- 语气专业简洁，适合房产发布\n"
             "- 不要返回解释文字"
         )
+        limit = 3
 
     from app.services.llm_client import get_llm_client, extract_json
     client = get_llm_client(settings)
@@ -662,10 +778,30 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
     ).strip()
     parsed = extract_json(text)
     if isinstance(parsed, list) and parsed:
-        items = [str(item).strip() for item in parsed if str(item).strip()][:3]
+        items = _normalize_summary_items(parsed, limit=limit)
+        if _needs_chinese_retry(items):
+            retry_text = client.chat(
+                messages=[
+                    {"role": "system", "content": system + "\n再次强调：必须使用简体中文，禁止日语假名作为主体描述，只输出 JSON 数组。"},
+                    {"role": "user", "content": prop_text},
+                ],
+                temperature=0.3,
+                max_tokens=2048,
+            ).strip()
+            retry_parsed = extract_json(retry_text)
+            if isinstance(retry_parsed, list) and retry_parsed:
+                items = _normalize_summary_items(retry_parsed, limit=limit)
         if items:
+            data[cache_key] = items
+            prop.data = data
+            db.session.commit()
             return items
-    return [text]
+    fallback = _normalize_summary_items([text], limit=limit)
+    if fallback:
+        data[cache_key] = fallback
+        prop.data = data
+        db.session.commit()
+    return fallback or [text]
 
 
 @api_bp.route('/summarize/property/<int:property_id>', methods=['POST'])
@@ -716,6 +852,7 @@ def property_detail_assets(property_id: int):
     try:
         title_items = _generate_property_summary_items(prop, 'title')
         summary_items = _generate_property_summary_items(prop, 'summary')
+        tag_items = _generate_property_summary_items(prop, 'tags')
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
@@ -728,6 +865,7 @@ def property_detail_assets(property_id: int):
         'property': refreshed.to_sectioned_dict(),
         'title_items': title_items[:3],
         'summary_items': summary_items[:3],
+        'tag_items': tag_items[:10],
     })
 
 
@@ -980,8 +1118,49 @@ def run_scraping_task(app, task_id: str) -> None:
         rental_scraper = SuumoScraper()
         buy_scraper = BuyScraper()
         mapper = FieldMapper()
+        enrich_service = _get_enrichment_service()
+        enrich_service = _get_enrichment_service()
 
         try:
+            search_urls = prog.get('search_urls') or []
+            if search_urls:
+                prog['phase'] = 'collecting'
+                prog['status'] = 'collecting'
+                combined_urls = list(prog.get('urls') or [])
+                seen = set(combined_urls)
+                parser = SuumoSearchParser(max_results=prog.get('max_results', 100), delay=prog['delay'])
+
+                for idx, search_url in enumerate(search_urls, start=1):
+                    prog['current_url'] = search_url
+
+                    def on_progress(count, page):
+                        prog['progress'] = count
+                        prog['current_url'] = f'Search {idx}/{len(search_urls)} - Page {page} ({count} URLs collected)'
+
+                    try:
+                        collected = parser.collect_urls(search_url, progress_callback=on_progress)
+                        for url in collected:
+                            if url not in seen:
+                                seen.add(url)
+                                combined_urls.append(url)
+                    except SearchParserError as e:
+                        prog['errors'].append({'url': search_url, 'error': str(e)})
+
+                if not combined_urls:
+                    task.status = 'failed'
+                    task.errors = prog['errors'] or [{'url': '', 'error': 'No property URLs found'}]
+                    prog['status'] = 'error'
+                    db.session.commit()
+                    return
+
+                prog['urls'] = combined_urls
+                prog['progress'] = 0
+                prog['total'] = len(combined_urls)
+                prog['phase'] = 'scraping'
+                prog['status'] = 'running'
+                task.total = len(combined_urls)
+                db.session.commit()
+
             for i, url in enumerate(prog['urls']):
                 prog['current_url'] = url
                 prog['progress'] = i
@@ -997,6 +1176,11 @@ def run_scraping_task(app, task_id: str) -> None:
                         raw = result.to_dict()
                         ptype = detect_property_type(url, raw)
                         normalized = mapper.normalize(raw, ptype, source_url=url)
+                        if enrich_service is not None:
+                            try:
+                                normalized = enrich_service.enrich(normalized, ptype)
+                            except Exception as enrich_error:
+                                logger.warning(f"Enrichment warning for {url}: {enrich_error}")
 
                         prop = Property(
                             task_id=task_id,
@@ -1160,6 +1344,11 @@ def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int,
                         raw = result.to_dict()
                         ptype = detect_property_type(url, raw)
                         normalized = mapper.normalize(raw, ptype, source_url=url)
+                        if enrich_service is not None:
+                            try:
+                                normalized = enrich_service.enrich(normalized, ptype)
+                            except Exception as enrich_error:
+                                logger.warning(f"Enrichment warning for {url}: {enrich_error}")
 
                         prop = Property(task_id=task_id, url=url)
                         prop.data = normalized

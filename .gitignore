@@ -16,6 +16,7 @@ __pycache__/
 *.swo
 
 # OS
+*.db
 .DS_Store
 Thumbs.db
 instance/sumo_digger.db
@@ -36,3 +37,6 @@ build/
 
 # docs
 docs/
+
+# mcp-shrimp-task-manager
+mcp-shrimp-task-manager/

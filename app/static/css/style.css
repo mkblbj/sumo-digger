@@ -139,6 +139,10 @@ main {
     font-size: 0.875rem;
 }
 
+#smartUrlStats {
+    font-size: 0.8rem;
+}
+
 /* Theme toggle button */
 #themeToggle {
     border-radius: 50%;
@@ -162,6 +166,22 @@ main {
 #errorList li {
     margin-bottom: 0.5rem;
     word-break: break-all;
+}
+
+.property-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.property-tag-copy {
+    cursor: pointer;
+    font-size: 0.8rem;
+    line-height: 1.2;
+}
+
+.property-tag-copy:hover {
+    background-color: rgba(13, 110, 253, 0.08);
 }
 
 /* Result card animation */

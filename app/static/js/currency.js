@@ -71,6 +71,23 @@ const CurrencyService = {
         return Math.round(jpyAmount * this.rate);
     },
 
+    formatJPYValue(jpyAmount) {
+        if (jpyAmount === null || jpyAmount === undefined || Number.isNaN(Number(jpyAmount))) return null;
+        return `¥${Number(jpyAmount).toLocaleString()}`;
+    },
+
+    formatParts(jpyText) {
+        if (!jpyText) return null;
+        const num = this.parseJPY(jpyText);
+        if (num === null) return null;
+        const cny = this.convert(num);
+        return {
+            jpy: this.formatJPYValue(num),
+            cny: cny === null ? null : `约¥${cny.toLocaleString()}`,
+            raw: jpyText,
+        };
+    },
+
     /**
      * Format a JPY text string by appending CNY equivalent.
      * "8.5万円" -> "8.5万円 (约¥3,944元)"
@@ -78,12 +95,9 @@ const CurrencyService = {
     format(jpyText) {
         if (!jpyText || !this.rate) return jpyText;
 
-        const num = this.parseJPY(jpyText);
-        if (num === null) return jpyText;
-
-        const cny = this.convert(num);
-        if (cny === null) return jpyText;
-
-        return `${jpyText} (约¥${cny.toLocaleString()}元)`;
+        const parts = this.formatParts(jpyText);
+        if (!parts) return jpyText;
+        if (!parts.cny) return parts.jpy || jpyText;
+        return `${parts.jpy} (${parts.cny})`;
     }
 };

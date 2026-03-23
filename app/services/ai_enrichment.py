@@ -10,14 +10,18 @@ Covers:
 import json
 import logging
 import math
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from app.schema.property_types import PropertyType
+from app.schema.field_definitions import get_key_to_label
 from app.services.llm_client import LLMClient, extract_json
 
 logger = logging.getLogger(__name__)
+
+_JAPANESE_KANA_RE = re.compile(r'[\u3040-\u30ff]')
 
 # ── Exchange rate ────────────────────────────────────────────────────────
 
@@ -136,8 +140,31 @@ class AIEnrichmentService:
             if isinstance(coords, list) and len(coords) >= 2:
                 data['basic.longitude'] = float(coords[0])
                 data['basic.latitude'] = float(coords[1])
+                return
         except Exception as e:
             logger.warning(f"Geocoding failed: {e}")
+
+        # Fallback: OpenStreetMap Nominatim, useful when GSI returns no result.
+        try:
+            resp = requests.get(
+                'https://nominatim.openstreetmap.org/search',
+                params={'q': address, 'format': 'jsonv2', 'limit': 1},
+                headers={'User-Agent': 'sumo-digger/1.0'},
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                return
+            payload = resp.json()
+            if not payload:
+                return
+            item = payload[0]
+            lon = item.get('lon')
+            lat = item.get('lat')
+            if lon and lat:
+                data['basic.longitude'] = float(lon)
+                data['basic.latitude'] = float(lat)
+        except Exception as e:
+            logger.warning(f"Nominatim geocoding failed: {e}")
 
     # ── Investment analysis ──────────────────────────────────────────
 
@@ -246,45 +273,87 @@ class AIEnrichmentService:
             logger.warning(f"Landmark generation failed: {e}")
 
     def _gen_tags(self, data: Dict[str, Any], ptype: PropertyType) -> None:
-        prop_info = self._build_prop_summary(data)
+        prop_info = self._build_prop_summary(data, ptype)
         try:
             text = self.llm.chat(
                 messages=[
-                    {"role": "system", "content": "你是日本房产信息编辑。根据物件信息生成2-4个标签，每个标签2-4个字。返回JSON数组格式，如[\"近车站\",\"角部屋\",\"免押金\"]。只输出JSON数组。"},
+                    {"role": "system", "content": (
+                        "你是日本房产信息编辑，必须只使用简体中文输出。\n"
+                        "根据物件信息生成 5-10 个左右的房源标签，每个标签 2-4 个字。\n"
+                        "标签要适合发布展示，优先突出交通、朝向、装修、景观、楼层、学区、配套、投资亮点。\n"
+                        "允许保留极少量必要的日本站名/地名原文，但标签主体严禁使用日语假名。\n"
+                        "返回 JSON 数组格式，如[\"近车站\",\"采光好\",\"新装修\"]。只输出 JSON 数组。"
+                    )},
                     {"role": "user", "content": prop_info},
                 ],
                 temperature=0.5, max_tokens=200,
             )
             parsed = extract_json(text)
             if isinstance(parsed, list):
-                data['basic.tags'] = parsed[:6]
+                tags = self._normalize_text_candidates(parsed, limit=10)
+                if self._needs_chinese_retry(tags):
+                    retry_text = self.llm.chat(
+                        messages=[
+                            {"role": "system", "content": "重新生成 5-10 个左右的房源标签。必须是简体中文，每个标签 2-4 个字，只输出 JSON 数组，禁止日语假名。"},
+                            {"role": "user", "content": prop_info},
+                        ],
+                        temperature=0.3, max_tokens=200,
+                    )
+                    retry_parsed = extract_json(retry_text)
+                    if isinstance(retry_parsed, list):
+                        tags = self._normalize_text_candidates(retry_parsed, limit=10)
+                if tags:
+                    data['basic.tags'] = tags
         except Exception as e:
             logger.warning(f"Tag generation failed: {e}")
 
     def _gen_title_candidates(self, data: Dict[str, Any], ptype: PropertyType) -> None:
-        prop_info = self._build_prop_summary(data)
+        prop_info = self._build_prop_summary(data, ptype)
+        title_rule = self._title_template_for_type(ptype)
         try:
             text = self.llm.chat(
                 messages=[
-                    {"role": "system", "content": "你是日本房产信息编辑。请根据物件信息生成3个适合中国客户阅读的中文标题候选。保留日本地名/站名原文。返回JSON数组。"},
+                    {"role": "system", "content": (
+                        "你是日本房产信息编辑。必须使用简体中文生成标题，严禁使用日语作为标题主体语言。\n"
+                        "保留日本地名/站名原文，但其他描述必须是简体中文。\n"
+                        "请根据物件信息生成 3 个标题候选，返回 JSON 数组。\n"
+                        "标题规则：20-40 字，不加句号，不要解释文字。\n"
+                        f"优先遵循格式：{title_rule}"
+                    )},
                     {"role": "user", "content": prop_info},
                 ],
                 temperature=0.6, max_tokens=300,
             )
             parsed = extract_json(text)
             if isinstance(parsed, list) and parsed:
-                data['basic.property_name'] = _merge_candidate_values(data.get('basic.property_name'), parsed, limit=3)
+                titles = self._normalize_text_candidates(parsed, limit=3)
+                if self._needs_chinese_retry(titles):
+                    retry_text = self.llm.chat(
+                        messages=[
+                            {"role": "system", "content": (
+                                "重新生成 3 个标题候选。必须使用简体中文，禁止日语假名作为主体描述。"
+                                f"格式参考：{title_rule}。只输出 JSON 数组。"
+                            )},
+                            {"role": "user", "content": prop_info},
+                        ],
+                        temperature=0.4, max_tokens=300,
+                    )
+                    retry_parsed = extract_json(retry_text)
+                    if isinstance(retry_parsed, list):
+                        titles = self._normalize_text_candidates(retry_parsed, limit=3)
+                if titles:
+                    data['basic.property_name'] = _merge_candidate_values(data.get('basic.property_name'), titles, limit=3)
         except Exception as e:
             logger.warning(f"Title generation failed: {e}")
 
     def _gen_descriptions(self, data: Dict[str, Any], ptype: PropertyType) -> None:
-        prop_info = self._build_prop_summary(data)
+        prop_info = self._build_prop_summary(data, ptype)
         try:
             text = self.llm.chat(
                 messages=[
                     {"role": "system", "content": (
-                        "你是日本房产信息编辑。根据物件信息写3个版本的简体中文介绍短文，"
-                        "每个200-300字。地名/站名保留日文。语气专业简洁。\n"
+                        "你是日本房产信息编辑。必须使用简体中文写 3 个版本的房源介绍短文，"
+                        "每个 200-300 字。地名/站名可保留日文，其他描述必须为简体中文。语气专业简洁。\n"
                         "返回JSON数组格式：[\"版本1...\", \"版本2...\", \"版本3...\"]"
                     )},
                     {"role": "user", "content": prop_info},
@@ -293,7 +362,24 @@ class AIEnrichmentService:
             )
             parsed = extract_json(text)
             if isinstance(parsed, list) and len(parsed) >= 1:
-                data['ai.description_candidates'] = _merge_candidate_values(data.get('ai.description_candidates'), parsed, limit=3)
+                descriptions = self._normalize_text_candidates(parsed, limit=3)
+                if self._needs_chinese_retry(descriptions):
+                    retry_text = self.llm.chat(
+                        messages=[
+                            {"role": "system", "content": "重新生成 3 个介绍版本。所有描述必须为简体中文，仅地名和站名可保留日文。只输出 JSON 数组。"},
+                            {"role": "user", "content": prop_info},
+                        ],
+                        temperature=0.4, max_tokens=4096,
+                    )
+                    retry_parsed = extract_json(retry_text)
+                    if isinstance(retry_parsed, list):
+                        descriptions = self._normalize_text_candidates(retry_parsed, limit=3)
+                if descriptions:
+                    data['ai.description_candidates'] = _merge_candidate_values(
+                        data.get('ai.description_candidates'),
+                        descriptions,
+                        limit=3,
+                    )
         except Exception as e:
             logger.warning(f"Description generation failed: {e}")
 
@@ -328,7 +414,9 @@ class AIEnrichmentService:
             text = self.llm.chat(
                 messages=[
                     {"role": "system", "content": (
-                        "你是日本房产周边配套整理助手。请基于地址与周边地标，整理学校、商圈、公园设施各最多5条。"
+                        "你是日本房产周边配套整理助手。请严格基于房源地址与周边地标，整理步行15分钟内的周边配套。"
+                        "学校仅保留大学、语言学校、专门学校；商圈和公园名称尽量保留日文。"
+                        "学校、商圈、公园设施各最多5条，不足可少于5条，不要编造超出15分钟步行范围的地点。"
                         "每条格式为：名称【距离xxkm 步行xx分钟】。返回JSON对象，包含 schools、business_districts、parks 三个数组。"
                     )},
                     {"role": "user", "content": f"地址: {address or '-'}\n附近标志: {landmark or '-'}"},
@@ -398,17 +486,52 @@ class AIEnrichmentService:
         except Exception as e:
             logger.warning(f"Tax estimation failed: {e}")
 
-    def _build_prop_summary(self, data: Dict[str, Any]) -> str:
+    def _build_prop_summary(self, data: Dict[str, Any], ptype: Optional[PropertyType] = None) -> str:
         """Build a concise text summary of property for LLM context."""
         skip = {'media.images', 'media.videos', 'media.vr_links',
                 'ai.description_candidates', 'poi.schools',
                 'poi.business_districts', 'poi.parks'}
+        label_map = get_key_to_label(ptype or PropertyType.OTHER) if ptype else {}
         lines = []
         for k, v in data.items():
             if k.startswith('_') or k in skip or not v:
                 continue
-            lines.append(f"{k}: {v}")
+            label = label_map.get(k, k)
+            lines.append(f"{label}: {v}")
         return '\n'.join(lines[:40])
+
+    def _title_template_for_type(self, ptype: PropertyType) -> str:
+        templates = {
+            PropertyType.RENTAL: '地区 + 特点 + 租房 + 户型 + 类型 + 特点短句',
+            PropertyType.MANSION: '地区 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
+            PropertyType.HOUSE: '地区 + 特点 + 户型 + 一户建 + 特点短句',
+            PropertyType.LAND: '地区 + 特点 + 土地面积 + 土地 + 特点短句',
+            PropertyType.INVESTMENT: '地区 + 特点 + 户型/类型 + 投资物件 + 特点短句',
+            PropertyType.OTHER: '地区 + 特点 + 物件类型 + 特点短句',
+        }
+        return templates.get(ptype, templates[PropertyType.OTHER])
+
+    def _normalize_text_candidates(self, values: Any, limit: int) -> List[str]:
+        items = _normalize_candidate_list(values)
+        deduped: List[str] = []
+        seen = set()
+        for item in items:
+            if item in seen:
+                continue
+            seen.add(item)
+            deduped.append(item)
+            if len(deduped) >= limit:
+                break
+        return deduped
+
+    def _needs_chinese_retry(self, items: List[str]) -> bool:
+        if not items:
+            return False
+        for item in items:
+            kana_count = len(_JAPANESE_KANA_RE.findall(item))
+            if kana_count >= 3:
+                return True
+        return False
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
