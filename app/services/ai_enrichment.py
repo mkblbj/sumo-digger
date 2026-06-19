@@ -17,6 +17,11 @@ import requests
 
 from app.schema.property_types import PropertyType
 from app.schema.field_definitions import get_key_to_label
+from app.services.ai_normalization import (
+    has_n_candidates,
+    merge_candidate_values,
+    normalize_text_candidates,
+)
 from app.services.llm_client import LLMClient, extract_json
 
 logger = logging.getLogger(__name__)
@@ -243,10 +248,25 @@ class AIEnrichmentService:
         if not data.get('basic.tags'):
             self._gen_tags(data, ptype)
 
-        if not _has_n_candidates(data.get('basic.property_name'), 3):
+        titles = normalize_text_candidates(
+            data.get('basic.property_name'),
+            limit=3,
+            preferred_key='title',
+            max_chars=30,
+        )
+        if titles:
+            data['basic.property_name'] = titles
+        if len(titles) < 3:
             self._gen_title_candidates(data, ptype)
 
-        if not _has_n_candidates(data.get('ai.description_candidates'), 3):
+        descriptions = normalize_text_candidates(
+            data.get('ai.description_candidates'),
+            limit=3,
+            preferred_key='description',
+        )
+        if descriptions:
+            data['ai.description_candidates'] = descriptions
+        if len(descriptions) < 3:
             self._gen_descriptions(data, ptype)
 
         if not data.get('poi.schools') or not data.get('poi.business_districts') or not data.get('poi.parks'):
@@ -317,7 +337,7 @@ class AIEnrichmentService:
                         "你是日本房产信息编辑。必须使用简体中文生成标题，严禁使用日语作为标题主体语言。\n"
                         "保留日本地名/站名原文，但其他描述必须是简体中文。\n"
                         "请根据物件信息生成 3 个标题候选，返回 JSON 数组。\n"
-                        "标题规则：20-40 字，不加句号，不要解释文字。\n"
+                        "标题规则：每个标题 25 字左右，绝不能超过 30 字，不加句号，不要解释文字。\n"
                         f"优先遵循格式：{title_rule}"
                     )},
                     {"role": "user", "content": prop_info},
@@ -325,13 +345,13 @@ class AIEnrichmentService:
                 temperature=0.6, max_tokens=300,
             )
             parsed = extract_json(text)
-            if isinstance(parsed, list) and parsed:
-                titles = self._normalize_text_candidates(parsed, limit=3)
+            if isinstance(parsed, (list, dict)) and parsed:
+                titles = self._normalize_text_candidates(parsed, limit=3, preferred_key='title', max_chars=30)
                 if self._needs_chinese_retry(titles):
                     retry_text = self.llm.chat(
                         messages=[
                             {"role": "system", "content": (
-                                "重新生成 3 个标题候选。必须使用简体中文，禁止日语假名作为主体描述。"
+                                "重新生成 3 个标题候选。每个标题 25 字左右，绝不能超过 30 字。必须使用简体中文，禁止日语假名作为主体描述。"
                                 f"格式参考：{title_rule}。只输出 JSON 数组。"
                             )},
                             {"role": "user", "content": prop_info},
@@ -339,10 +359,16 @@ class AIEnrichmentService:
                         temperature=0.4, max_tokens=300,
                     )
                     retry_parsed = extract_json(retry_text)
-                    if isinstance(retry_parsed, list):
-                        titles = self._normalize_text_candidates(retry_parsed, limit=3)
+                    if isinstance(retry_parsed, (list, dict)):
+                        titles = self._normalize_text_candidates(retry_parsed, limit=3, preferred_key='title', max_chars=30)
                 if titles:
-                    data['basic.property_name'] = _merge_candidate_values(data.get('basic.property_name'), titles, limit=3)
+                    data['basic.property_name'] = merge_candidate_values(
+                        data.get('basic.property_name'),
+                        titles,
+                        limit=3,
+                        preferred_key='title',
+                        max_chars=30,
+                    )
         except Exception as e:
             logger.warning(f"Title generation failed: {e}")
 
@@ -361,8 +387,8 @@ class AIEnrichmentService:
                 temperature=0.7, max_tokens=4096,
             )
             parsed = extract_json(text)
-            if isinstance(parsed, list) and len(parsed) >= 1:
-                descriptions = self._normalize_text_candidates(parsed, limit=3)
+            if isinstance(parsed, (list, dict)) and parsed:
+                descriptions = self._normalize_text_candidates(parsed, limit=3, preferred_key='description')
                 if self._needs_chinese_retry(descriptions):
                     retry_text = self.llm.chat(
                         messages=[
@@ -372,13 +398,14 @@ class AIEnrichmentService:
                         temperature=0.4, max_tokens=4096,
                     )
                     retry_parsed = extract_json(retry_text)
-                    if isinstance(retry_parsed, list):
-                        descriptions = self._normalize_text_candidates(retry_parsed, limit=3)
+                    if isinstance(retry_parsed, (list, dict)):
+                        descriptions = self._normalize_text_candidates(retry_parsed, limit=3, preferred_key='description')
                 if descriptions:
-                    data['ai.description_candidates'] = _merge_candidate_values(
+                    data['ai.description_candidates'] = merge_candidate_values(
                         data.get('ai.description_candidates'),
                         descriptions,
                         limit=3,
+                        preferred_key='description',
                     )
         except Exception as e:
             logger.warning(f"Description generation failed: {e}")
@@ -511,18 +538,15 @@ class AIEnrichmentService:
         }
         return templates.get(ptype, templates[PropertyType.OTHER])
 
-    def _normalize_text_candidates(self, values: Any, limit: int) -> List[str]:
-        items = _normalize_candidate_list(values)
-        deduped: List[str] = []
-        seen = set()
-        for item in items:
-            if item in seen:
-                continue
-            seen.add(item)
-            deduped.append(item)
-            if len(deduped) >= limit:
-                break
-        return deduped
+    def _normalize_text_candidates(self, values: Any, limit: int,
+                                   preferred_key: Optional[str] = None,
+                                   max_chars: Optional[int] = None) -> List[str]:
+        return normalize_text_candidates(
+            values,
+            limit=limit,
+            preferred_key=preferred_key,
+            max_chars=max_chars,
+        )
 
     def _needs_chinese_retry(self, items: List[str]) -> bool:
         if not items:

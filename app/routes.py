@@ -29,6 +29,7 @@ from app.exporters.exporter import DataExporter, ExportError
 from app.schema.property_types import PropertyType
 from app.schema.mapper import FieldMapper, detect_property_type
 from app.schema.field_definitions import get_key_to_label
+from app.services.ai_normalization import normalize_text_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -99,18 +100,23 @@ def _summary_cache_config(summary_type: str) -> tuple[str, int]:
     raise ValueError('Unsupported summary type')
 
 
-def _normalize_summary_items(items: Any, limit: int) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    for item in items if isinstance(items, list) else [items]:
-        text = str(item).strip()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        normalized.append(text)
-        if len(normalized) >= limit:
-            break
-    return normalized
+def _summary_normalization_options(summary_type: str) -> tuple[str | None, int | None]:
+    if summary_type == 'title':
+        return 'title', 30
+    if summary_type == 'summary':
+        return 'description', None
+    return None, None
+
+
+def _normalize_summary_items(items: Any, limit: int,
+                             preferred_key: str | None = None,
+                             max_chars: int | None = None) -> List[str]:
+    return normalize_text_candidates(
+        items,
+        limit=limit,
+        preferred_key=preferred_key,
+        max_chars=max_chars,
+    )
 
 
 def _needs_chinese_retry(items: List[str]) -> bool:
@@ -720,9 +726,21 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
 
     data = prop.data
     cache_key, min_count = _summary_cache_config(summary_type)
+    preferred_key, max_chars = _summary_normalization_options(summary_type)
+    cache_limit = 10 if summary_type == 'tags' else 3
     cached = data.get(cache_key)
-    if isinstance(cached, list) and len([v for v in cached if str(v).strip()]) >= min_count:
-        return cached[:10] if summary_type == 'tags' else cached[:3]
+    cached_items = _normalize_summary_items(
+        cached,
+        limit=cache_limit,
+        preferred_key=preferred_key,
+        max_chars=max_chars,
+    )
+    if len(cached_items) >= min_count:
+        if cached_items != cached:
+            data[cache_key] = cached_items
+            prop.data = data
+            db.session.commit()
+        return cached_items
 
     prop_text = _build_llm_prop_text(data)
     ptype = _resolve_property_type(data)
@@ -740,7 +758,7 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
             "你是日本房产信息编辑。必须使用简体中文生成 3 个适合中国客户阅读的标题候选。\n"
             "规则：\n"
             "- 返回 JSON 数组，例如 [\"标题1\", \"标题2\", \"标题3\"]\n"
-            "- 每个标题 20-40 字左右，不要标点符号\n"
+            "- 每个标题 25 字左右，绝不能超过 30 字，不要标点符号\n"
             f"- 优先遵循格式：{templates.get(ptype, templates[PropertyType.OTHER])}\n"
             "- 地名/站名可保留日文，但标题主体严禁使用日语假名\n"
             "- 不要返回解释文字"
@@ -778,7 +796,12 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
     ).strip()
     parsed = extract_json(text)
     if isinstance(parsed, list) and parsed:
-        items = _normalize_summary_items(parsed, limit=limit)
+        items = _normalize_summary_items(
+            parsed,
+            limit=limit,
+            preferred_key=preferred_key,
+            max_chars=max_chars,
+        )
         if _needs_chinese_retry(items):
             retry_text = client.chat(
                 messages=[
@@ -790,13 +813,23 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
             ).strip()
             retry_parsed = extract_json(retry_text)
             if isinstance(retry_parsed, list) and retry_parsed:
-                items = _normalize_summary_items(retry_parsed, limit=limit)
+                items = _normalize_summary_items(
+                    retry_parsed,
+                    limit=limit,
+                    preferred_key=preferred_key,
+                    max_chars=max_chars,
+                )
         if items:
             data[cache_key] = items
             prop.data = data
             db.session.commit()
             return items
-    fallback = _normalize_summary_items([text], limit=limit)
+    fallback = _normalize_summary_items(
+        [text],
+        limit=limit,
+        preferred_key=preferred_key,
+        max_chars=max_chars,
+    )
     if fallback:
         data[cache_key] = fallback
         prop.data = data

@@ -1,10 +1,10 @@
-"""Unified LLM client supporting Gemini native, OpenAI native, and OpenAI-compatible APIs."""
+"""Unified LLM client supporting Gemini, OpenAI Responses, and chat-compatible APIs."""
 
 import base64
 import json
 import logging
 import re
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -14,33 +14,40 @@ PROVIDER_OPENAI = 'openai'
 PROVIDER_COMPATIBLE = 'compatible'
 PROVIDER_AUTO = 'auto'
 
+OPENAI_RESPONSES_MODEL_PREFIXES = ('gpt-', 'o1', 'o3', 'o4', 'o5')
+
+
+def _is_openai_responses_model(model: str) -> bool:
+    """Return True for models that should use OpenAI's Responses API."""
+    return (model or '').lower().startswith(OPENAI_RESPONSES_MODEL_PREFIXES)
+
 
 def detect_provider(base_url: str, model: str) -> str:
     """Auto-detect LLM provider from base_url and model name.
 
     Priority:
-    1. Known provider domains in URL -> that provider
-    2. Model name starts with 'gemini' -> gemini (SDK handles custom base_url)
-    3. Custom URL + non-gemini model -> compatible
-    4. Model name starts with 'gpt-'/'o1'/'o3'/'o4' -> openai
-    5. Fallback -> compatible
+    1. Gemini domain or gemini-* model -> Gemini native SDK
+    2. api.openai.com or GPT/o-series model -> OpenAI Responses API
+       (custom base_url is still allowed for OpenAI-compatible Responses proxies)
+    3. Custom URL + non-GPT model -> chat-completions compatible API
+    4. Fallback -> chat-completions compatible API
     """
     base = (base_url or '').lower().rstrip('/')
     mdl = (model or '').lower()
 
     if 'generativelanguage.googleapis.com' in base:
         return PROVIDER_GEMINI
-    if 'api.openai.com' in base:
-        return PROVIDER_OPENAI
-
     if mdl.startswith('gemini'):
         return PROVIDER_GEMINI
 
+    if 'api.openai.com' in base:
+        return PROVIDER_OPENAI
+
+    if _is_openai_responses_model(mdl):
+        return PROVIDER_OPENAI
+
     if base:
         return PROVIDER_COMPATIBLE
-
-    if mdl.startswith(('gpt-', 'o1', 'o3', 'o4')):
-        return PROVIDER_OPENAI
 
     return PROVIDER_COMPATIBLE
 
@@ -50,8 +57,8 @@ class LLMClient:
 
     Supports three backends:
       - gemini:     google-genai SDK (native Gemini API, best Vision support)
-      - openai:     openai SDK targeting api.openai.com
-      - compatible: openai SDK targeting any OpenAI-compatible endpoint
+      - openai:     openai SDK using the new Responses API (/responses)
+      - compatible: openai SDK using legacy Chat Completions (/chat/completions)
     """
 
     def __init__(self, base_url: str, api_key: str, model: str,
@@ -78,7 +85,7 @@ class LLMClient:
         if self._openai_client is None:
             from openai import OpenAI
             kwargs = {'api_key': self.api_key}
-            if self.provider == PROVIDER_COMPATIBLE:
+            if self.base_url:
                 kwargs['base_url'] = self.base_url
             self._openai_client = OpenAI(**kwargs)
         return self._openai_client
@@ -101,6 +108,8 @@ class LLMClient:
         """
         if self.provider == PROVIDER_GEMINI:
             return self._gemini_chat(messages, temperature, max_tokens)
+        if self.provider == PROVIDER_OPENAI:
+            return self._openai_responses_chat(messages, temperature, max_tokens)
         return self._openai_chat(messages, temperature, max_tokens)
 
     # ------------------------------------------------------------------
@@ -128,6 +137,9 @@ class LLMClient:
         if self.provider == PROVIDER_GEMINI:
             return self._gemini_vision(prompt, images, mime_type,
                                        system_prompt, temperature, max_tokens)
+        if self.provider == PROVIDER_OPENAI:
+            return self._openai_responses_vision(prompt, images, mime_type,
+                                                 system_prompt, temperature, max_tokens)
         return self._openai_vision(prompt, images, mime_type,
                                    system_prompt, temperature, max_tokens)
 
@@ -209,7 +221,108 @@ class LLMClient:
         return response.text
 
     # ------------------------------------------------------------------
-    # OpenAI / Compatible implementation
+    # OpenAI Responses API implementation
+    # ------------------------------------------------------------------
+
+    def _openai_responses_chat(self, messages: list, temperature: float,
+                               max_tokens: int) -> str:
+        client = self._get_openai()
+        if not hasattr(client, 'responses'):
+            raise RuntimeError(
+                "Installed openai package does not support Responses API. "
+                "Run: pip install -U openai"
+            )
+
+        instructions, response_input = self._messages_to_responses_input(messages)
+        response = client.responses.create(
+            model=self.model,
+            instructions=instructions,
+            input=response_input,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+        return self._response_output_text(response)
+
+    def _openai_responses_vision(self, prompt: str, images: List[bytes],
+                                 mime_type: str, system_prompt: Optional[str],
+                                 temperature: float, max_tokens: int) -> str:
+        client = self._get_openai()
+        if not hasattr(client, 'responses'):
+            raise RuntimeError(
+                "Installed openai package does not support Responses API. "
+                "Run: pip install -U openai"
+            )
+
+        content_parts = [{"type": "input_text", "text": prompt}]
+        for img_bytes in images:
+            b64 = base64.b64encode(img_bytes).decode('utf-8')
+            content_parts.append({
+                "type": "input_image",
+                "image_url": f"data:{mime_type};base64,{b64}",
+            })
+
+        response = client.responses.create(
+            model=self.model,
+            instructions=system_prompt,
+            input=[{"role": "user", "content": content_parts}],
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+        return self._response_output_text(response)
+
+    @classmethod
+    def _messages_to_responses_input(cls, messages: list) -> Tuple[Optional[str], list]:
+        instructions = []
+        response_input = []
+
+        for msg in messages:
+            role = msg.get('role', 'user')
+            content = cls._content_to_text(msg.get('content', ''))
+            if role == 'system':
+                instructions.append(content)
+                continue
+
+            response_input.append({
+                "role": "assistant" if role == 'assistant' else "user",
+                "content": [{"type": "input_text", "text": content}],
+            })
+
+        return ('\n\n'.join(instructions) if instructions else None), response_input
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        return json.dumps(content, ensure_ascii=False)
+
+    @staticmethod
+    def _response_output_text(response: Any) -> str:
+        output_text = getattr(response, 'output_text', None)
+        if output_text is not None:
+            return output_text
+
+        if isinstance(response, dict):
+            output_text = response.get('output_text')
+            if output_text is not None:
+                return output_text
+            output_items = response.get('output', [])
+        else:
+            output_items = getattr(response, 'output', []) or []
+
+        chunks = []
+        for item in output_items:
+            content_items = item.get('content', []) if isinstance(item, dict) else getattr(item, 'content', [])
+            for content in content_items or []:
+                if isinstance(content, dict):
+                    text = content.get('text')
+                else:
+                    text = getattr(content, 'text', None)
+                if text:
+                    chunks.append(text)
+        return ''.join(chunks)
+
+    # ------------------------------------------------------------------
+    # Legacy OpenAI-compatible Chat Completions implementation
     # ------------------------------------------------------------------
 
     def _openai_chat(self, messages: list, temperature: float,

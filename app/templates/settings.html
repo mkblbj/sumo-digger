@@ -13,7 +13,7 @@
             <div class="card-body">
                 <div class="mb-3">
                     <label for="llmBaseUrl" class="form-label">API Base URL</label>
-                    <input type="text" class="form-control" id="llmBaseUrl" placeholder="https://your-api-server.com/v1">
+                    <input type="text" class="form-control" id="llmBaseUrl" placeholder="https://api.openai.com/v1 or https://your-api-server.com/v1">
                 </div>
                 <div class="mb-3">
                     <label for="llmApiKey" class="form-label">API Key</label>
@@ -33,8 +33,8 @@
                     <select class="form-select" id="llmProvider">
                         <option value="auto">Auto Detect</option>
                         <option value="gemini">Gemini (Native SDK)</option>
-                        <option value="openai">OpenAI (Native SDK)</option>
-                        <option value="compatible">OpenAI Compatible</option>
+                        <option value="openai">OpenAI Responses API</option>
+                        <option value="compatible">OpenAI Compatible Chat API</option>
                     </select>
                     <div class="form-text" id="providerHint"></div>
                 </div>
@@ -64,10 +64,10 @@
 
     providerSelect.addEventListener('change', () => {
         const hints = {
-            auto: 'Automatically detects Gemini/OpenAI from model name or URL',
+            auto: 'Automatically detects Gemini, OpenAI Responses, or legacy chat-compatible API from model name/URL',
             gemini: 'Uses google-genai SDK — best Vision support, only needs API Key',
-            openai: 'Uses openai SDK — targets api.openai.com',
-            compatible: 'Uses openai SDK with custom Base URL'
+            openai: 'Uses OpenAI Responses API (/responses). Works with api.openai.com or a custom Responses-compatible Base URL',
+            compatible: 'Uses legacy Chat Completions API (/chat/completions) with custom Base URL'
         };
         providerHint.textContent = hints[providerSelect.value] || '';
     });
