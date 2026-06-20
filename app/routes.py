@@ -44,7 +44,6 @@ _progress_lock = threading.Lock()
 # Validation constants
 MIN_DELAY = 1
 MAX_DELAY = 10
-MAX_SEARCH_RESULTS = 1000
 _JAPANESE_KANA_RE = re.compile(r'[\u3040-\u30ff]')
 
 
@@ -169,7 +168,6 @@ def start_scrape():
 
     urls = data.get('urls', [])
     delay = data.get('delay', 2)
-    max_results = data.get('max_results', 100)
 
     # Validate delay parameter
     try:
@@ -180,12 +178,6 @@ def start_scrape():
             }), 400
     except (TypeError, ValueError):
         delay = 2
-
-    try:
-        max_results = int(max_results)
-        max_results = max(1, min(max_results, MAX_SEARCH_RESULTS))
-    except (TypeError, ValueError):
-        max_results = 100
 
     # Filter empty URLs
     urls = [url.strip() for url in urls if url and url.strip()]
@@ -232,7 +224,6 @@ def start_scrape():
             'status': 'collecting' if search_urls else 'pending',
             'urls': detail_urls,
             'search_urls': search_urls,
-            'max_results': max_results,
             'delay': delay,
             'progress': 0,
             'total': len(detail_urls) if detail_urls and not search_urls else 0,
@@ -392,7 +383,6 @@ def start_search_scrape():
         return jsonify({'error': 'search_url is required'}), 400
 
     search_url = data['search_url'].strip()
-    max_results = min(int(data.get('max_results', 100)), 1000)
     delay = int(data.get('delay', 2))
     delay = max(MIN_DELAY, min(delay, MAX_DELAY))
 
@@ -410,7 +400,6 @@ def start_search_scrape():
             'status': 'collecting',
             'urls': [],
             'search_urls': [search_url],
-            'max_results': max_results,
             'delay': delay,
             'progress': 0,
             'total': 0,
@@ -424,7 +413,7 @@ def start_search_scrape():
     thread.daemon = True
     thread.start()
 
-    return jsonify({'task_id': task_id, 'max_results': max_results})
+    return jsonify({'task_id': task_id})
 
 
 # ==================== Tasks API ====================
@@ -1161,7 +1150,7 @@ def run_scraping_task(app, task_id: str) -> None:
                 prog['status'] = 'collecting'
                 combined_urls = list(prog.get('urls') or [])
                 seen = set(combined_urls)
-                parser = SuumoSearchParser(max_results=prog.get('max_results', 100), delay=prog['delay'])
+                parser = SuumoSearchParser(delay=prog['delay'])
 
                 for idx, search_url in enumerate(search_urls, start=1):
                     prog['current_url'] = search_url
@@ -1306,7 +1295,7 @@ def run_translation_task(app, task_id: str) -> None:
             logger.error(f"Translation task error: {e}")
 
 
-def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int, delay: int) -> None:
+def run_search_scrape_task(app, task_id: str, search_url: str, delay: int) -> None:
     """Collect URLs from search result page, then scrape each property."""
     with app.app_context():
         prog = _progress.get(task_id)
@@ -1324,7 +1313,7 @@ def run_search_scrape_task(app, task_id: str, search_url: str, max_results: int,
 
         # Phase 1: Collect URLs from search pages
         try:
-            parser = SuumoSearchParser(max_results=max_results, delay=delay)
+            parser = SuumoSearchParser(delay=delay)
 
             def on_progress(count, page):
                 prog['progress'] = count

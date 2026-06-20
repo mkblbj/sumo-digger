@@ -16,8 +16,7 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_RESULTS = 100
-ABSOLUTE_MAX_RESULTS = 1000
+DEFAULT_MAX_RESULTS = None
 
 
 class SearchParserError(Exception):
@@ -51,8 +50,8 @@ class SuumoSearchParser:
 
     TIMEOUT = 15
 
-    def __init__(self, max_results: int = DEFAULT_MAX_RESULTS, delay: float = 2.0):
-        self.max_results = min(max_results, ABSOLUTE_MAX_RESULTS)
+    def __init__(self, max_results: int | None = DEFAULT_MAX_RESULTS, delay: float = 2.0):
+        self.max_results = max_results if max_results and max_results > 0 else None
         self.delay = delay
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
@@ -64,7 +63,7 @@ class SuumoSearchParser:
     def collect_urls(self, search_url: str, progress_callback=None) -> List[str]:
         """
         Collect property detail URLs from a SUUMO search result page.
-        Paginates automatically until max_results or no more pages.
+        Paginates automatically until no more pages, unless max_results is set.
 
         Args:
             search_url: SUUMO search result page URL
@@ -80,7 +79,7 @@ class SuumoSearchParser:
         seen = set()
         page = 1
 
-        while len(collected) < self.max_results:
+        while self.max_results is None or len(collected) < self.max_results:
             page_url = self._build_page_url(search_url, page)
             logger.info(f"Fetching search page {page}: {page_url}")
 
@@ -97,15 +96,21 @@ class SuumoSearchParser:
                     logger.info(f"No more results on page {page}")
                     break
 
+                added_this_page = 0
                 for url in detail_urls:
-                    if url not in seen and len(collected) < self.max_results:
+                    if url not in seen and (self.max_results is None or len(collected) < self.max_results):
                         seen.add(url)
                         collected.append(url)
+                        added_this_page += 1
+
+                # Avoid infinite pagination if SUUMO repeats the last/result page.
+                if added_this_page == 0:
+                    logger.info(f"No new results on page {page}")
+                    break
 
                 if progress_callback:
                     progress_callback(len(collected), page)
 
-                # Check if there's a next page
                 if not self._has_next_page(soup):
                     break
 
@@ -198,11 +203,6 @@ class SuumoSearchParser:
         # SUUMO pagination: look for "次へ" link or pagination-parts
         next_link = soup.find('a', string=re.compile(r'次へ'))
         if next_link:
-            return True
-
-        # Also check for pagination with page numbers
-        pager = soup.select('.pagination_set a, .paginate_set a, .pagination a')
-        if pager:
             return True
 
         return False

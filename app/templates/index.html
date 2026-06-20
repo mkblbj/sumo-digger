@@ -35,8 +35,6 @@
                     <div class="d-flex gap-2 align-items-center">
                         <label class="text-muted small mb-0" data-i18n="options.delay">间隔(秒)</label>
                         <input type="number" class="form-control form-control-sm" id="delayInput" value="2" min="1" max="10" style="width:65px;">
-                        <label class="text-muted small mb-0" id="maxResultsLabel">搜索最大条数</label>
-                        <input type="number" class="form-control form-control-sm" id="maxResultsInput" value="100" min="1" max="1000" style="width:90px;">
                         <button class="btn btn-sm btn-outline-secondary" id="clearUrls">
                             <i class="bi bi-x-circle"></i>
                         </button>
@@ -131,7 +129,6 @@
     const errorCard = document.getElementById('errorCard');
     const errorText = document.getElementById('errorText');
     const errorList = document.getElementById('errorList');
-    const maxResultsInput = document.getElementById('maxResultsInput');
 
     function isSearchUrl(url) {
         return /^https?:\/\/suumo\.jp\/(jj\/(?:chintai|bukken)\/ichiran\/|ms\/shinchiku\/|ms\/chuko\/|ikkodate\/|chukoikkodate\/|tochi\/|toushi\/)/.test(url);
@@ -156,7 +153,6 @@
         });
         urlCount.textContent = `${n} URL`;
         smartUrlStats.textContent = `物件URL ${detailCount} 条 | 搜索页URL ${searchCount} 条 | 无效 ${invalidCount} 条`;
-        maxResultsInput.disabled = searchCount === 0;
     }
     document.getElementById('clearUrls').addEventListener('click', () => { urlInput.value = ''; updateUrlCount(); });
     updateUrlCount();
@@ -165,7 +161,6 @@
     startScrapeBtn.addEventListener('click', async () => {
         const urls = urlInput.value.split('\n').map(u => u.trim()).filter(Boolean);
         const delay = parseInt(document.getElementById('delayInput').value) || 2;
-        const maxResults = parseInt(maxResultsInput.value) || 100;
         if (!urls.length) { alert(i18n.t('error.noUrl')); return; }
 
         beginProgress();
@@ -173,7 +168,7 @@
             const res = await fetch('/api/scrape', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ urls, delay, max_results: maxResults })
+                body: JSON.stringify({ urls, delay })
             });
             const data = await res.json();
             if (res.ok) { currentTaskId = data.task_id; connectSSE(data.task_id); }
