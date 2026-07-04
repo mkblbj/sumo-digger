@@ -91,3 +91,11 @@ def test_route_summary_normalizer_extracts_stringified_object_and_limits_title()
     )
 
     assert items == [title[:30]]
+
+
+def test_normalize_tags_caps_to_four():
+    service = AIEnrichmentService(llm_client=None)
+    tags = service._normalize_tags([
+        "南向采光", "双车位", "专用庭", "免网费", "宅配箱", "浴室干燥"
+    ])
+    assert tags == ["南向采光", "双车位", "专用庭", "免网费"]

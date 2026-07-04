@@ -95,7 +95,7 @@ def _summary_cache_config(summary_type: str) -> tuple[str, int]:
     if summary_type == 'summary':
         return 'ai.description_candidates', 3
     if summary_type == 'tags':
-        return 'basic.tags', 5
+        return 'basic.tags', 4
     raise ValueError('Unsupported summary type')
 
 
@@ -119,7 +119,12 @@ def _normalize_summary_items(items: Any, limit: int,
 
 
 def _needs_chinese_retry(items: List[str]) -> bool:
-    return any(len(_JAPANESE_KANA_RE.findall(item)) >= 3 for item in items)
+    for item in items:
+        kana_count = len(_JAPANESE_KANA_RE.findall(item))
+        cjk_count = len(re.findall(r'[\u4e00-\u9fff]', item))
+        if kana_count >= 3 and kana_count > cjk_count * 0.15:
+            return True
+    return False
 
 
 def _get_enrichment_service():
@@ -716,7 +721,7 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
     data = prop.data
     cache_key, min_count = _summary_cache_config(summary_type)
     preferred_key, max_chars = _summary_normalization_options(summary_type)
-    cache_limit = 10 if summary_type == 'tags' else 3
+    cache_limit = 4 if summary_type == 'tags' else 3
     cached = data.get(cache_key)
     cached_items = _normalize_summary_items(
         cached,
@@ -736,7 +741,7 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
 
     if summary_type == 'title':
         templates = {
-            PropertyType.RENTAL: '地区 + 特点 + 租房 + 户型 + 类型 + 特点短句',
+            PropertyType.RENTAL: '地区（区或者市后面的町名） + 特点词 + 租房 + 户型 + 一户建/公寓塔楼 + 特点短句',
             PropertyType.MANSION: '地区 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
             PropertyType.HOUSE: '地区 + 特点 + 户型 + 一户建 + 特点短句',
             PropertyType.LAND: '地区 + 特点 + 土地面积 + 土地 + 特点短句',
@@ -756,10 +761,10 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
     elif summary_type == 'tags':
         system = (
             "你是日本房产信息编辑。必须使用简体中文输出。\n"
-            "请基于物件信息生成 5-10 个左右房源标签，每个标签 2-4 个字。\n"
+            "请基于物件信息生成最多 4 个房源标签，每个标签 2-4 个字。\n"
             "标签主体严禁使用日语假名，只输出 JSON 数组。"
         )
-        limit = 10
+        limit = 4
     else:
         system = (
             "你是日本房产信息编辑。根据物件信息写 3 个版本的简体中文介绍短文。\n"
@@ -887,7 +892,7 @@ def property_detail_assets(property_id: int):
         'property': refreshed.to_sectioned_dict(),
         'title_items': title_items[:3],
         'summary_items': summary_items[:3],
-        'tag_items': tag_items[:10],
+        'tag_items': tag_items[:4],
     })
 
 

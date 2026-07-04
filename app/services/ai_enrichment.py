@@ -103,8 +103,10 @@ class AIEnrichmentService:
 
     def _calc_price_cny(self, data: Dict[str, Any]) -> None:
         price_jpy = data.get('basic.price_jpy')
-        if price_jpy and isinstance(price_jpy, (int, float)):
-            data['basic.price_cny'] = int(price_jpy * self.exchange_rate)
+        rent_jpy = data.get('rent.rent')
+        source = price_jpy if price_jpy else rent_jpy
+        if source and isinstance(source, (int, float)):
+            data['basic.price_cny'] = int(source * self.exchange_rate)
 
     def _calc_unit_price(self, data: Dict[str, Any], ptype: PropertyType) -> None:
         price = data.get('basic.price_jpy')
@@ -227,10 +229,20 @@ class AIEnrichmentService:
         if rent and not data.get('rent.initial_rent'):
             data['rent.initial_rent'] = rent
 
+        if rent and data.get('analysis.brokerage_fee') in (None, '', 0):
+            data['analysis.brokerage_fee'] = rent
+
         deposit = _to_int(data.get('rent.deposit'))
         key_money = _to_int(data.get('rent.key_money'))
         brokerage = _to_int(data.get('analysis.brokerage_fee'))
         other = _sum_other_fees(data.get('analysis_or_detail.other_fees'))
+
+        if deposit is None:
+            deposit = 0
+            data['rent.deposit'] = 0
+        if key_money is None:
+            key_money = 0
+            data['rent.key_money'] = 0
 
         parts = [rent, deposit, key_money, brokerage, other]
         if rent:
@@ -247,6 +259,8 @@ class AIEnrichmentService:
 
         if not data.get('basic.tags'):
             self._gen_tags(data, ptype)
+        if data.get('basic.tags'):
+            data['basic.tags'] = self._normalize_tags(data.get('basic.tags'))
 
         titles = normalize_text_candidates(
             data.get('basic.property_name'),
@@ -299,7 +313,7 @@ class AIEnrichmentService:
                 messages=[
                     {"role": "system", "content": (
                         "你是日本房产信息编辑，必须只使用简体中文输出。\n"
-                        "根据物件信息生成 5-10 个左右的房源标签，每个标签 2-4 个字。\n"
+                        "根据物件信息生成最多 4 个房源标签，每个标签 2-4 个字。\n"
                         "标签要适合发布展示，优先突出交通、朝向、装修、景观、楼层、学区、配套、投资亮点。\n"
                         "允许保留极少量必要的日本站名/地名原文，但标签主体严禁使用日语假名。\n"
                         "返回 JSON 数组格式，如[\"近车站\",\"采光好\",\"新装修\"]。只输出 JSON 数组。"
@@ -310,18 +324,18 @@ class AIEnrichmentService:
             )
             parsed = extract_json(text)
             if isinstance(parsed, list):
-                tags = self._normalize_text_candidates(parsed, limit=10)
+                tags = self._normalize_tags(parsed)
                 if self._needs_chinese_retry(tags):
                     retry_text = self.llm.chat(
                         messages=[
-                            {"role": "system", "content": "重新生成 5-10 个左右的房源标签。必须是简体中文，每个标签 2-4 个字，只输出 JSON 数组，禁止日语假名。"},
+                            {"role": "system", "content": "重新生成最多 4 个房源标签。必须是简体中文，每个标签 2-4 个字，只输出 JSON 数组，禁止日语假名。"},
                             {"role": "user", "content": prop_info},
                         ],
                         temperature=0.3, max_tokens=200,
                     )
                     retry_parsed = extract_json(retry_text)
                     if isinstance(retry_parsed, list):
-                        tags = self._normalize_text_candidates(retry_parsed, limit=10)
+                        tags = self._normalize_tags(retry_parsed)
                 if tags:
                     data['basic.tags'] = tags
         except Exception as e:
@@ -529,7 +543,7 @@ class AIEnrichmentService:
 
     def _title_template_for_type(self, ptype: PropertyType) -> str:
         templates = {
-            PropertyType.RENTAL: '地区 + 特点 + 租房 + 户型 + 类型 + 特点短句',
+            PropertyType.RENTAL: '地区（区或者市后面的町名） + 特点词 + 租房 + 户型 + 一户建/公寓塔楼 + 特点短句',
             PropertyType.MANSION: '地区 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
             PropertyType.HOUSE: '地区 + 特点 + 户型 + 一户建 + 特点短句',
             PropertyType.LAND: '地区 + 特点 + 土地面积 + 土地 + 特点短句',
@@ -548,12 +562,27 @@ class AIEnrichmentService:
             max_chars=max_chars,
         )
 
+    def _normalize_tags(self, values: Any) -> List[str]:
+        tags = self._normalize_text_candidates(values, limit=10)
+        cleaned: List[str] = []
+        seen = set()
+        for tag in tags:
+            tag = tag.strip()
+            if not tag or tag in seen:
+                continue
+            seen.add(tag)
+            cleaned.append(tag)
+            if len(cleaned) >= 4:
+                break
+        return cleaned
+
     def _needs_chinese_retry(self, items: List[str]) -> bool:
         if not items:
             return False
         for item in items:
             kana_count = len(_JAPANESE_KANA_RE.findall(item))
-            if kana_count >= 3:
+            cjk_count = len(re.findall(r'[\u4e00-\u9fff]', item))
+            if kana_count >= 3 and kana_count > cjk_count * 0.15:
                 return True
         return False
 

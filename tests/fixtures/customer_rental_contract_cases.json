@@ -1,0 +1,79 @@
+[
+  {
+    "name": "tokyo_machida_city_must_not_disappear",
+    "source_url": "https://suumo.jp/chintai/bc_contract_city_1/",
+    "raw": {
+      "所在地": "東京都町田市原町田1-1",
+      "賃料": "10万円",
+      "敷金": "-",
+      "礼金": "-",
+      "管理費・共益費": "5000円",
+      "階": "1階/2階建",
+      "建物種別": "一戸建て",
+      "築年数": "築5年",
+      "間取り": "1LDK",
+      "部屋の特徴・設備": "バストイレ別、エアコン、宅配ボックス"
+    },
+    "expected": {
+      "basic.city_ward": "東京都町田市",
+      "rent.rent": 100000,
+      "rent.deposit": 0,
+      "rent.key_money": 0,
+      "analysis.brokerage_fee": 100000,
+      "rent.initial_total_fee": 200000,
+      "detail.floor": 1,
+      "detail.total_floors": 2,
+      "detail.sub_type": "一户建"
+    }
+  },
+  {
+    "name": "kyoto_city_path_must_keep_prefecture",
+    "source_url": "https://suumo.jp/chintai/bc_contract_city_2/",
+    "raw": {
+      "所在地": "京都府京都市下京区烏丸通1-1",
+      "賃料": "13万円",
+      "敷金": "13万円",
+      "礼金": "13万円",
+      "階": "3階/10階建",
+      "建物種別": "マンション",
+      "築年月": "2025年8月",
+      "間取り": "1K"
+    },
+    "expected": {
+      "basic.city_ward": "京都府京都市",
+      "rent.rent": 130000,
+      "rent.deposit": 130000,
+      "rent.key_money": 130000,
+      "analysis.brokerage_fee": 130000,
+      "rent.initial_total_fee": 520000,
+      "detail.floor": 3,
+      "detail.total_floors": 10,
+      "detail.sub_type": "公寓"
+    }
+  },
+  {
+    "name": "detached_house_floor_semantics",
+    "source_url": "https://suumo.jp/chintai/bc_contract_floor_1/",
+    "raw": {
+      "所在地": "福岡県北九州市門司区小松町",
+      "賃料": "13.5万円",
+      "敷金": "なし",
+      "礼金": "27万円",
+      "階": "2階建",
+      "建物種別": "一戸建て",
+      "築年数": "築3年",
+      "間取り": "4LDK"
+    },
+    "expected": {
+      "basic.city_ward": "福岡県北九州市",
+      "rent.rent": 135000,
+      "rent.deposit": 0,
+      "rent.key_money": 270000,
+      "analysis.brokerage_fee": 135000,
+      "rent.initial_total_fee": 540000,
+      "detail.floor": null,
+      "detail.total_floors": 2,
+      "detail.sub_type": "一户建"
+    }
+  }
+]
