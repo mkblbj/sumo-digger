@@ -419,7 +419,9 @@ class FieldMapper:
             _, total = extract_floor_info(total_source)
             if total is not None:
                 data['detail.total_floors'] = total
-            if re.fullmatch(r'\d+\s*階建', floor_text):
+            if floor_text.strip() in {'-', 'なし', '無し', '无', '不要', '無料', '無', '0'}:
+                data.pop('detail.floor', None)
+            elif re.fullmatch(r'\d+\s*階建', floor_text):
                 data.pop('detail.floor', None)
             elif re.fullmatch(r'\d+\s*[-〜~－]\s*\d+\s*階', floor_text):
                 data.pop('detail.floor', None)

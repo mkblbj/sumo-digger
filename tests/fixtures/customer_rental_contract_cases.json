@@ -101,5 +101,31 @@
       "detail.total_floors": 2,
       "detail.sub_type": "一户建"
     }
+  },
+  {
+    "name": "detached_house_dash_floor_semantics",
+    "source_url": "https://suumo.jp/chintai/jnc_000103097900/",
+    "raw": {
+      "所在地": "福岡県北九州市門司区寺内１",
+      "賃料": "5万円",
+      "敷金": "-",
+      "礼金": "-",
+      "階": "-",
+      "階建": "地上2階建",
+      "建物種別": "一戸建て",
+      "築年数": "築44年",
+      "間取り": "5LDK"
+    },
+    "expected": {
+      "basic.city_ward": "福岡県北九州市",
+      "rent.rent": 50000,
+      "rent.deposit": 0,
+      "rent.key_money": 0,
+      "analysis.brokerage_fee": 50000,
+      "rent.initial_total_fee": 100000,
+      "detail.floor": null,
+      "detail.total_floors": 2,
+      "detail.sub_type": "一户建"
+    }
   }
 ]
