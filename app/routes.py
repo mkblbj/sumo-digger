@@ -127,6 +127,27 @@ def _needs_chinese_retry(items: List[str]) -> bool:
     return False
 
 
+def _summary_fallback_items(text: str, summary_type: str, limit: int,
+                            preferred_key: str | None = None,
+                            max_chars: int | None = None) -> List[str]:
+    """Normalize the raw LLM output for the fallback branch.
+
+    For text-based summaries (title/summary), reject content that looks
+    Japanese so we don't cache untranslated text. Returns [] when rejected.
+    """
+    items = _normalize_summary_items(
+        [text],
+        limit=limit,
+        preferred_key=preferred_key,
+        max_chars=max_chars,
+    )
+    if not items:
+        return []
+    if summary_type in ('title', 'summary') and _needs_chinese_retry(items):
+        return []
+    return items
+
+
 def _get_enrichment_service():
     settings = Settings.get()
     if not settings.llm_api_key:
@@ -748,14 +769,11 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
             PropertyType.INVESTMENT: '地区 + 特点 + 户型/类型 + 投资物件 + 特点短句',
             PropertyType.OTHER: '地区 + 特点 + 物件类型 + 特点短句',
         }
-        system = (
-            "你是日本房产信息编辑。必须使用简体中文生成 3 个适合中国客户阅读的标题候选。\n"
-            "规则：\n"
-            "- 返回 JSON 数组，例如 [\"标题1\", \"标题2\", \"标题3\"]\n"
-            "- 每个标题 25 字左右，绝不能超过 30 字，不要标点符号\n"
-            f"- 优先遵循格式：{templates.get(ptype, templates[PropertyType.OTHER])}\n"
-            "- 地名/站名可保留日文，但标题主体严禁使用日语假名\n"
-            "- 不要返回解释文字"
+        from app.services.ai_enrichment import _build_title_system_prompt
+        system = _build_title_system_prompt(
+            ptype,
+            templates.get(ptype, templates[PropertyType.OTHER]),
+            data,
         )
         limit = 3
     elif summary_type == 'tags':
@@ -818,17 +836,44 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
             prop.data = data
             db.session.commit()
             return items
-    fallback = _normalize_summary_items(
-        [text],
-        limit=limit,
-        preferred_key=preferred_key,
-        max_chars=max_chars,
+    fallback = _summary_fallback_items(
+        text, summary_type, limit,
+        preferred_key=preferred_key, max_chars=max_chars,
     )
+    # If the fallback was rejected as Japanese, retry once forcing Chinese.
+    if not fallback and summary_type in ('title', 'summary'):
+        retry_text = client.chat(
+            messages=[
+                {"role": "system", "content": system + "\n再次强调：必须使用简体中文，禁止日语假名作为主体描述，只输出 JSON 数组。"},
+                {"role": "user", "content": prop_text},
+            ],
+            temperature=0.3,
+            max_tokens=2048,
+        ).strip()
+        retry_parsed = extract_json(retry_text)
+        if isinstance(retry_parsed, list) and retry_parsed:
+            retry_items = _normalize_summary_items(
+                retry_parsed, limit=limit,
+                preferred_key=preferred_key, max_chars=max_chars,
+            )
+            if retry_items and not _needs_chinese_retry(retry_items):
+                data[cache_key] = retry_items
+                prop.data = data
+                db.session.commit()
+                return retry_items
+        # Retry as raw text too, applying the same Chinese guard.
+        fallback = _summary_fallback_items(
+            retry_text, summary_type, limit,
+            preferred_key=preferred_key, max_chars=max_chars,
+        )
+
     if fallback:
         data[cache_key] = fallback
         prop.data = data
         db.session.commit()
-    return fallback or [text]
+        return fallback
+    # Nothing acceptable to cache (e.g. still Japanese): return without caching.
+    return fallback or []
 
 
 @api_bp.route('/summarize/property/<int:property_id>', methods=['POST'])

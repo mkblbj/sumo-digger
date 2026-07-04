@@ -344,16 +344,11 @@ class AIEnrichmentService:
     def _gen_title_candidates(self, data: Dict[str, Any], ptype: PropertyType) -> None:
         prop_info = self._build_prop_summary(data, ptype)
         title_rule = self._title_template_for_type(ptype)
+        title_system = _build_title_system_prompt(ptype, title_rule, data)
         try:
             text = self.llm.chat(
                 messages=[
-                    {"role": "system", "content": (
-                        "你是日本房产信息编辑。必须使用简体中文生成标题，严禁使用日语作为标题主体语言。\n"
-                        "保留日本地名/站名原文，但其他描述必须是简体中文。\n"
-                        "请根据物件信息生成 3 个标题候选，返回 JSON 数组。\n"
-                        "标题规则：每个标题 25 字左右，绝不能超过 30 字，不加句号，不要解释文字。\n"
-                        f"优先遵循格式：{title_rule}"
-                    )},
+                    {"role": "system", "content": title_system},
                     {"role": "user", "content": prop_info},
                 ],
                 temperature=0.6, max_tokens=300,
@@ -365,8 +360,8 @@ class AIEnrichmentService:
                     retry_text = self.llm.chat(
                         messages=[
                             {"role": "system", "content": (
-                                "重新生成 3 个标题候选。每个标题 25 字左右，绝不能超过 30 字。必须使用简体中文，禁止日语假名作为主体描述。"
-                                f"格式参考：{title_rule}。只输出 JSON 数组。"
+                                title_system
+                                + "\n再次强调：必须使用简体中文，禁止日语假名作为主体描述，只输出 JSON 数组。"
                             )},
                             {"role": "user", "content": prop_info},
                         ],
@@ -451,29 +446,50 @@ class AIEnrichmentService:
         landmark = data.get('basic.nearby_landmark')
         if not address and not landmark:
             return
-        try:
-            text = self.llm.chat(
-                messages=[
-                    {"role": "system", "content": (
-                        "你是日本房产周边配套整理助手。请严格基于房源地址与周边地标，整理步行15分钟内的周边配套。"
-                        "学校仅保留大学、语言学校、专门学校；商圈和公园名称尽量保留日文。"
-                        "学校、商圈、公园设施各最多5条，不足可少于5条，不要编造超出15分钟步行范围的地点。"
-                        "每条格式为：名称【距离xxkm 步行xx分钟】。返回JSON对象，包含 schools、business_districts、parks 三个数组。"
-                    )},
-                    {"role": "user", "content": f"地址: {address or '-'}\n附近标志: {landmark or '-'}"},
-                ],
-                temperature=0.4, max_tokens=1200,
-            )
-            parsed = extract_json(text)
-            if isinstance(parsed, dict):
-                if isinstance(parsed.get('schools'), list) and not data.get('poi.schools'):
-                    data['poi.schools'] = parsed['schools'][:5]
-                if isinstance(parsed.get('business_districts'), list) and not data.get('poi.business_districts'):
-                    data['poi.business_districts'] = parsed['business_districts'][:5]
-                if isinstance(parsed.get('parks'), list) and not data.get('poi.parks'):
-                    data['poi.parks'] = parsed['parks'][:5]
-        except Exception as e:
-            logger.warning(f"POI generation failed: {e}")
+
+        system = (
+            "你是日本房产周边配套整理助手。请严格基于房源地址与周边地标，整理步行15分钟内的周边配套。"
+            "学校仅保留大学、语言学校、专门学校；商圈和公园名称尽量保留日文。"
+            "学校、商圈、公园设施各最多5条，不足可少于5条，不要编造超出15分钟步行范围的地点。"
+            "每条格式为：名称【距离xxkm 步行xx分钟】。\n"
+            "【硬性要求】必须返回 JSON 对象，且必须同时包含 schools、business_districts、parks 三个键；"
+            "若某一类确实找不到，该键返回空数组 []，绝不能省略任何一个键。"
+        )
+        user = f"地址: {address or '-'}\n附近标志: {landmark or '-'}"
+        required = ('schools', 'business_districts', 'parks')
+
+        # Up to 3 attempts (initial + 2 retries). Retry when the call fails,
+        # the result is not a dict, or any of the three keys is missing.
+        parsed = None
+        for attempt in range(3):
+            temperature = 0.4 if attempt == 0 else 0.2
+            try:
+                text = self.llm.chat(
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=temperature, max_tokens=2500,
+                )
+            except Exception as e:
+                logger.warning(f"POI generation failed (attempt {attempt + 1}): {e}")
+                continue
+
+            candidate = extract_json(text)
+            if isinstance(candidate, dict):
+                parsed = candidate
+                if all(key in candidate for key in required):
+                    break  # all three keys present, good
+
+        if not isinstance(parsed, dict):
+            return
+
+        if isinstance(parsed.get('schools'), list) and not data.get('poi.schools'):
+            data['poi.schools'] = parsed['schools'][:5]
+        if isinstance(parsed.get('business_districts'), list) and not data.get('poi.business_districts'):
+            data['poi.business_districts'] = parsed['business_districts'][:5]
+        if isinstance(parsed.get('parks'), list) and not data.get('poi.parks'):
+            data['poi.parks'] = parsed['parks'][:5]
 
     def _gen_tax_estimates(self, data: Dict[str, Any], ptype: PropertyType) -> None:
         """Use LLM to estimate Japanese taxes if not already set."""
@@ -588,6 +604,41 @@ class AIEnrichmentService:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+def _build_title_system_prompt(ptype: PropertyType, title_rule: str,
+                               data: Optional[Dict[str, Any]] = None) -> str:
+    """Build the title system prompt.
+
+    For RENTAL, apply hard rules the customer requires: no 都/道/府/県/市/区
+    level big place names (start at 町名/丁目), must contain 租房, must use the
+    original Japanese layout notation (1LDK/1K/ワンルーム), keep length <= 30.
+    """
+    layout_raw = ''
+    if data:
+        layout_raw = str(data.get('basic.layout_raw') or data.get('basic.layout_cn') or '').strip()
+
+    if ptype == PropertyType.RENTAL:
+        layout_hint = layout_raw or '1LDK/1K/ワンルーム'
+        return (
+            "你是日本房产信息编辑。必须使用简体中文生成 3 个标题候选，返回 JSON 数组。\n"
+            "【硬性规则，必须严格遵守】\n"
+            "1. 地名必须从町名/丁目级别开始（如“天王寺区舟橋町”只取“舟橋町”一段），"
+            "严禁输出都/道/府/县/市/区级别的大地名前缀（禁止出现如“大阪市天王寺区”这样的大地名）。\n"
+            "2. 标题必须包含“租房”二字。\n"
+            f"3. 户型必须使用日文原文（如 {layout_hint}），禁止翻译成“N居室”。\n"
+            "4. 每个标题总长不超过 30 字，不加句号，不要解释文字。\n"
+            "5. 标题主体使用简体中文，仅地名/站名可保留日文原文，禁止日语假名作为主体描述。\n"
+            f"格式参考：{title_rule}"
+        )
+
+    return (
+        "你是日本房产信息编辑。必须使用简体中文生成标题，严禁使用日语作为标题主体语言。\n"
+        "保留日本地名/站名原文，但其他描述必须是简体中文。\n"
+        "请根据物件信息生成 3 个标题候选，返回 JSON 数组。\n"
+        "标题规则：每个标题 25 字左右，绝不能超过 30 字，不加句号，不要解释文字。\n"
+        f"优先遵循格式：{title_rule}"
+    )
+
 
 def _to_int(val: Any) -> Optional[int]:
     if val is None:

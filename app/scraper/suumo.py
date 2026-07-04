@@ -156,7 +156,7 @@ class SuumoScraper:
                 area=table_data.get('専有面積', ''),
                 direction=table_data.get('向き', ''),
                 building_type=table_data.get('建物種別', ''),
-                age=table_data.get('築年数', '') or table_data.get('築年月', ''),
+                age=table_data.get('築年月', '') or table_data.get('築年数', ''),
                 floor=table_data.get('階', '') or table_data.get('階建', ''),
                 access_info=access_info,
                 location=table_data.get('所在地', ''),

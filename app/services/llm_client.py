@@ -394,6 +394,52 @@ def extract_json(text: str) -> Optional[dict]:
         except json.JSONDecodeError:
             pass
 
+    # Last resort: try to repair a truncated JSON object.
+    repaired = _repair_truncated_json(text)
+    if repaired is not None:
+        return repaired
+
+    return None
+
+
+def _repair_truncated_json(content: str) -> Optional[dict]:
+    """Recover a truncated JSON object by progressively closing brackets.
+
+    Handles responses cut off mid-array/value, e.g.
+    '{"a": ["x"], "b": ["y"'  ->  {"a": ["x"], "b": ["y"]}
+    """
+    content = content.strip()
+    start = content.find('{')
+    if start == -1:
+        return None
+    content = content[start:]
+
+    # Direct close attempts first.
+    for suffix in ('', '"', '"]', ']', '"]}', ']}', '}', '"}', '""}'):
+        for closing in ('', '}', ']}', '"]}'):
+            candidate = content + suffix + closing
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+    # Trim back to the last complete quoted string, then close the structure.
+    pos = len(content)
+    while True:
+        pos = content.rfind('"', 0, pos)
+        if pos <= 0:
+            break
+        head = content[:pos + 1]
+        for closing in (']}', '}', '"]}'):
+            try:
+                parsed = json.loads(head + closing)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
     return None
 
 

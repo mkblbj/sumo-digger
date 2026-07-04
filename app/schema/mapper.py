@@ -131,6 +131,21 @@ _JP_KEY_MAP: Dict[str, str] = {
 }
 
 
+# Fee-type Japanese keys that should be gathered into
+# analysis_or_detail.other_fees (they are otherwise dropped by _map_keys).
+# Maps raw JP key -> Chinese fee name used in the other_fees array / remark.
+_OTHER_FEE_KEY_MAP: Dict[str, str] = {
+    '鍵交換': '钥匙更换费',
+    '鍵交換代': '钥匙更换费',
+    '鍵交換費': '钥匙更换费',
+    '保証会社': '担保公司费',
+    '保証委託料': '担保委托费',
+    '損害保険': '火灾保险费',
+    '損保': '火灾保险费',
+    '火災保険': '火灾保险费',
+}
+
+
 def _build_cn_label_map() -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     for ptype in PropertyType:
@@ -320,7 +335,9 @@ class FieldMapper:
         mapped = self._normalize_rental_floor_semantics(mapped, property_type)
         mapped = self._convert_layout(mapped)
         mapped = self._normalize_special_fields(mapped)
+        mapped = self._collect_other_fees(mapped, raw_data)
         mapped = self._clean_numbers(mapped, property_type)
+        mapped = self._build_remark(mapped, raw_data)
         mapped = self._assemble_access(mapped, raw_data)
         mapped = self._extract_city_ward(mapped)
         mapped = self._set_property_type(mapped, property_type)
@@ -348,6 +365,13 @@ class FieldMapper:
             elif jp_key in valid_keys:
                 if jp_key not in result or not result[jp_key]:
                     result[jp_key] = value
+
+        # built_month: 築年月 (absolute, e.g. '1981年3月') must win over the
+        # relative 築年数 (e.g. '築45年'), regardless of raw dict key order.
+        if 'basic.built_month' in valid_keys:
+            abs_built = raw.get('築年月')
+            if abs_built:
+                result['basic.built_month'] = abs_built
 
         # Carry over image URLs
         if 'media.images' not in result:
@@ -404,7 +428,13 @@ class FieldMapper:
 
     def _convert_layout(self, data: Dict[str, Any]) -> Dict[str, Any]:
         if 'basic.layout_cn' in data and data['basic.layout_cn']:
-            data['basic.layout_cn'] = convert_layout(str(data['basic.layout_cn']))
+            raw_layout = str(data['basic.layout_cn']).strip()
+            # Preserve the original 間取り (e.g. '1LDK', 'ワンルーム') so the
+            # project side can distinguish 单间/1LDK and titles can use the
+            # original notation.
+            if raw_layout and not data.get('basic.layout_raw'):
+                data['basic.layout_raw'] = raw_layout
+            data['basic.layout_cn'] = convert_layout(raw_layout)
         return data
 
     def _normalize_rental_floor_semantics(self, data: Dict[str, Any], ptype: PropertyType) -> Dict[str, Any]:
@@ -445,6 +475,79 @@ class FieldMapper:
                 data['detail.other_areas'] = parsed_areas
         return data
 
+    def _collect_other_fees(self, data: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Gather fee-type rows (鍵交換/保証会社/損保 …) that _map_keys drops
+        into analysis_or_detail.other_fees as [{name, amount}]."""
+        existing = data.get('analysis_or_detail.other_fees')
+        fees: List[Dict[str, Any]] = list(existing) if isinstance(existing, list) else []
+        seen_names = {
+            f.get('name') for f in fees if isinstance(f, dict) and f.get('name')
+        }
+
+        for jp_key, cn_name in _OTHER_FEE_KEY_MAP.items():
+            value = raw.get(jp_key)
+            if not value or cn_name in seen_names:
+                continue
+            item: Dict[str, Any] = {'name': cn_name, 'raw': str(value).strip()}
+            # 只有绝对日元金额才写 amount；『家賃50%』『賃料1ヶ月』等相对值不是日元数，
+            # 写进 amount 会被 _sum_other_fees 错误计入总额、remark 也会误导(如"50円")。
+            text = str(value)
+            is_relative = any(tok in text for tok in ('%', '％', '家賃', '賃料', 'ヶ月', 'カ月', 'ヵ月', '箇月'))
+            if not is_relative:
+                amount = clean_number(text, to_man_yen=True)
+                if amount is not None:
+                    item['amount'] = amount
+            fees.append(item)
+            seen_names.add(cn_name)
+
+        if fees:
+            data['analysis_or_detail.other_fees'] = fees
+        return data
+
+    def _build_remark(self, data: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a Chinese fee/notes summary into detail.remark (rule-based, no LLM).
+
+        Combines 押金/礼金 originals, other_fees细项, and any 備考 row into a
+        顿号-separated Chinese sentence.
+        """
+        if data.get('detail.remark'):
+            return data
+
+        parts: List[str] = []
+
+        deposit_raw = raw.get('敷金') or raw.get('保証金')
+        if deposit_raw and str(deposit_raw).strip() not in {'-', 'なし', '無', '無し'}:
+            parts.append(f"押金{str(deposit_raw).strip()}")
+        key_money_raw = raw.get('礼金')
+        if key_money_raw and str(key_money_raw).strip() not in {'-', 'なし', '無', '無し'}:
+            parts.append(f"礼金{str(key_money_raw).strip()}")
+
+        fees = data.get('analysis_or_detail.other_fees')
+        if isinstance(fees, list):
+            for fee in fees:
+                if not isinstance(fee, dict):
+                    continue
+                name = fee.get('name')
+                if not name:
+                    continue
+                amount = fee.get('amount')
+                raw_val = fee.get('raw')
+                # 优先展示原文(raw)，避免把『家賃50%』类相对值渲染成误导的『50円』
+                if raw_val:
+                    parts.append(f"{name}{raw_val}")
+                elif amount is not None:
+                    parts.append(f"{name}{amount}円")
+                else:
+                    parts.append(str(name))
+
+        note = raw.get('備考') or raw.get('その他')
+        if note and str(note).strip():
+            parts.append(str(note).strip())
+
+        if parts:
+            data['detail.remark'] = '、'.join(parts)
+        return data
+
     # ── Step 4: Clean numeric values ─────────────────────────────────
 
     _PRICE_KEYS = {
@@ -468,6 +571,16 @@ class FieldMapper:
         for key in self._AREA_KEYS:
             if key in data and data[key] and isinstance(data[key], str):
                 data[key] = clean_number(str(data[key]))
+
+        # total_floors: when it's a compound string (e.g. '7階/15階建',
+        # '地下2地上60階建'), extract_floor_info correctly yields the building
+        # total. clean_number would wrongly grab the first digit (7/2/1), so
+        # prefer extract_floor_info and only fall back when it returns None.
+        total_val = data.get('detail.total_floors')
+        if isinstance(total_val, str) and '階建' in total_val:
+            _, total_floors = extract_floor_info(total_val)
+            if total_floors is not None:
+                data['detail.total_floors'] = total_floors
 
         floor_source = None
         if isinstance(data.get('detail.floor'), str):

@@ -66,8 +66,13 @@ STRUCTURE_JP_MAP = {
     "RC": "RC造 钢筋混凝土造",
     "鉄骨鉄筋コンクリート造": "SRC造 钢骨钢筋混凝土造",
     "鉄骨鉄筋コンクリート": "SRC造 钢骨钢筋混凝土造",
+    # Abbreviations from SUUMO. 鉄骨鉄筋コン (SRC) MUST precede 鉄筋コン (RC):
+    # _map_enum's substring fallback iterates insertion order, so RC would
+    # otherwise steal 鉄骨鉄筋コン via its 鉄筋コン substring.
+    "鉄骨鉄筋コン": "SRC造 钢骨钢筋混凝土造",
     "SRC造": "SRC造 钢骨钢筋混凝土造",
     "SRC": "SRC造 钢骨钢筋混凝土造",
+    "鉄筋コン": "RC造 钢筋混凝土造",
     "コンクリートブロック造": "CB造 混凝土砖结构",
     "CB造": "CB造 混凝土砖结构",
     "アルミ造": "AL造 铝合金造",
@@ -150,6 +155,7 @@ SUB_TYPE_JP_MAP = {
     "戸建": "一户建",
     "戸建て": "一户建",
     "テラスハウス": "一户建",
+    "タウンハウス": "一户建",
     "鉄筋コン": "公寓",
 }
 
