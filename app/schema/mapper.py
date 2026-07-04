@@ -411,12 +411,18 @@ class FieldMapper:
         if ptype != PropertyType.RENTAL:
             return data
         sub_type = str(data.get('detail.sub_type') or '')
-        floor_text = str(data.get('detail.floor') or data.get('detail.total_floors') or '')
+        floor_text = str(data.get('detail.floor') or '')
+        total_text = str(data.get('detail.total_floors') or '')
         looks_detached = '一户建' in sub_type or '一戸建' in sub_type or '戸建' in sub_type
-        if looks_detached and re.fullmatch(r'\d+\s*階建', floor_text):
-            total = clean_number(floor_text)
-            data.pop('detail.floor', None)
-            data['detail.total_floors'] = total
+        if looks_detached:
+            total_source = total_text if '階建' in total_text else floor_text
+            _, total = extract_floor_info(total_source)
+            if total is not None:
+                data['detail.total_floors'] = total
+            if re.fullmatch(r'\d+\s*階建', floor_text):
+                data.pop('detail.floor', None)
+            elif re.fullmatch(r'\d+\s*[-〜~－]\s*\d+\s*階', floor_text):
+                data.pop('detail.floor', None)
         return data
 
     def _normalize_special_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:

@@ -75,5 +75,31 @@
       "detail.total_floors": 2,
       "detail.sub_type": "一户建"
     }
+  },
+  {
+    "name": "detached_house_range_floor_semantics",
+    "source_url": "https://suumo.jp/chintai/jnc_000104736762/?bc=100487740918",
+    "raw": {
+      "所在地": "東京都八王子市美山町",
+      "賃料": "10万円",
+      "敷金": "10万円",
+      "礼金": "20万円",
+      "階": "1-2階",
+      "階建": "1-2階/地上2階建",
+      "建物種別": "一戸建て",
+      "築年数": "築45年",
+      "間取り": "4LDK"
+    },
+    "expected": {
+      "basic.city_ward": "東京都八王子市",
+      "rent.rent": 100000,
+      "rent.deposit": 100000,
+      "rent.key_money": 200000,
+      "analysis.brokerage_fee": 100000,
+      "rent.initial_total_fee": 500000,
+      "detail.floor": null,
+      "detail.total_floors": 2,
+      "detail.sub_type": "一户建"
+    }
   }
 ]
