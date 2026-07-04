@@ -1,6 +1,8 @@
 """Tests for SUUMO scraper module"""
 
 import pytest
+from bs4 import BeautifulSoup
+
 from app.scraper.suumo import SuumoScraper, PropertyData
 
 
@@ -76,7 +78,7 @@ class TestPropertyData:
 
         assert result['URL'] == "https://suumo.jp/chintai/bc_100000000000/"
         assert result['物件名'] == "Test Property"
-        assert result['賃料・初期費用'] == "10万円"
+        assert result['賃料'] == "10万円"
         assert result['管理費・共益費'] == "5000円"
         assert result['敷金'] == "1ヶ月"
         assert result['礼金'] == "1ヶ月"
@@ -84,7 +86,7 @@ class TestPropertyData:
         assert result['専有面積'] == "50m2"
         assert result['アクセス1'] == "駅A 徒歩5分"
         assert result['アクセス2'] == "駅B 徒歩10分"
-        assert result['アクセス3'] == "なし"
+        assert result['アクセス3'] == ""
 
     def test_to_dict_empty_access_info(self):
         """Test PropertyData with empty access info"""
@@ -95,9 +97,9 @@ class TestPropertyData:
 
         result = data.to_dict()
 
-        assert result['アクセス1'] == "なし"
-        assert result['アクセス2'] == "なし"
-        assert result['アクセス3'] == "なし"
+        assert result['アクセス1'] == ""
+        assert result['アクセス2'] == ""
+        assert result['アクセス3'] == ""
 
     def test_to_dict_table_data(self):
         """Test PropertyData with table data"""
@@ -115,3 +117,22 @@ class TestPropertyData:
         assert result['損保'] == '要加入'
         assert result['駐車場'] == 'あり'
         assert result['仲介手数料'] == '1ヶ月'
+
+
+def test_extract_table_data_reads_basic_property_table():
+    html = """
+    <html><body>
+      <div class="section_h1">
+        <table>
+          <tr><th>所在地</th><td>東京都新宿区早稲田鶴巻町</td></tr>
+          <tr><th>駅徒歩</th><td>東京メトロ東西線/早稲田駅 歩10分</td></tr>
+          <tr><th>階</th><td>1階/3階建</td></tr>
+        </table>
+      </div>
+    </body></html>
+    """
+    scraper = SuumoScraper()
+    data = scraper._extract_table_data(BeautifulSoup(html, 'html.parser'))
+    assert data['所在地'] == '東京都新宿区早稲田鶴巻町'
+    assert data['駅徒歩'] == '東京メトロ東西線/早稲田駅 歩10分'
+    assert data['階'] == '1階/3階建'

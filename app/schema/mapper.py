@@ -177,7 +177,11 @@ def clean_number(text: str, *, to_man_yen: bool = False) -> Optional[Any]:
 
     to_man_yen: if True, converts "万円" to raw yen (x10000).
     """
-    if not text or text == '-':
+    if isinstance(text, str):
+        raw_text = text.strip()
+        if raw_text in {'-', 'なし', '無し', '无', '不要', '無料', '無'}:
+            return 0
+    if text is None or text == '':
         return None
     text = str(text).strip().replace(',', '').replace('、', '')
     if to_man_yen:
@@ -313,6 +317,7 @@ class FieldMapper:
         """
         mapped = self._map_keys(raw_data, property_type)
         mapped = self._convert_enums(mapped, property_type)
+        mapped = self._normalize_rental_floor_semantics(mapped, property_type)
         mapped = self._convert_layout(mapped)
         mapped = self._normalize_special_fields(mapped)
         mapped = self._clean_numbers(mapped, property_type)
@@ -400,6 +405,18 @@ class FieldMapper:
     def _convert_layout(self, data: Dict[str, Any]) -> Dict[str, Any]:
         if 'basic.layout_cn' in data and data['basic.layout_cn']:
             data['basic.layout_cn'] = convert_layout(str(data['basic.layout_cn']))
+        return data
+
+    def _normalize_rental_floor_semantics(self, data: Dict[str, Any], ptype: PropertyType) -> Dict[str, Any]:
+        if ptype != PropertyType.RENTAL:
+            return data
+        sub_type = str(data.get('detail.sub_type') or '')
+        floor_text = str(data.get('detail.floor') or data.get('detail.total_floors') or '')
+        looks_detached = '一户建' in sub_type or '一戸建' in sub_type or '戸建' in sub_type
+        if looks_detached and re.fullmatch(r'\d+\s*階建', floor_text):
+            total = clean_number(floor_text)
+            data.pop('detail.floor', None)
+            data['detail.total_floors'] = total
         return data
 
     def _normalize_special_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -491,18 +508,37 @@ class FieldMapper:
 
     # ── Step 6: Extract city/ward from address ───────────────────────
 
-    _CITY_RE = re.compile(
-        r'^((?:東京都|北海道|(?:大阪|京都)府|.{2,3}県)'
-        r'(?:[^\s市区町村]{1,5}[市区町村]))'
-    )
+    _PREF_RE = re.compile(r'^(東京都|北海道|大阪府|京都府|.{2,3}県)')
+    _CITY_RE = re.compile(r'^(.{2,}?市)')
+    _ONE_CHAR_CITY_RE = re.compile(r'^(.市)')
+    _WARD_RE = re.compile(r'^(.+?[区町村])')
 
     def _extract_city_ward(self, data: Dict[str, Any]) -> Dict[str, Any]:
         if data.get('basic.city_ward'):
             return data
         address = data.get('basic.address', '') or ''
-        m = self._CITY_RE.match(address)
-        if m:
-            data['basic.city_ward'] = m.group(1)
+        m = self._PREF_RE.match(address)
+        if not m:
+            return data
+        pref = m.group(1)
+        rest = address[len(pref):]
+        city = ''
+        city_match = self._CITY_RE.match(rest)
+        if city_match:
+            city = city_match.group(1)
+            while len(rest) > len(city) and rest[len(city)] == '市':
+                city += '市'
+        else:
+            one_char_city_match = self._ONE_CHAR_CITY_RE.match(rest)
+            if one_char_city_match:
+                city = one_char_city_match.group(1)
+        if not city:
+            ward_match = self._WARD_RE.match(rest)
+            if ward_match:
+                city = ward_match.group(1)
+        if not city:
+            return data
+        data['basic.city_ward'] = pref + city
         return data
 
     # ── Step 7: Set property type label ──────────────────────────────
