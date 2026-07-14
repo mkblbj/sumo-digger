@@ -205,6 +205,16 @@ def start_scrape():
     except (TypeError, ValueError):
         delay = 2
 
+    # Optional cap: only collect + scrape the first N properties from search pages.
+    # None/0/invalid => unlimited (backward compatible).
+    max_results = data.get('max_results')
+    try:
+        max_results = int(max_results) if max_results else None
+        if max_results is not None and max_results <= 0:
+            max_results = None
+    except (TypeError, ValueError):
+        max_results = None
+
     # Filter empty URLs
     urls = [url.strip() for url in urls if url and url.strip()]
 
@@ -251,6 +261,7 @@ def start_scrape():
             'urls': detail_urls,
             'search_urls': search_urls,
             'delay': delay,
+            'max_results': max_results,
             'progress': 0,
             'total': len(detail_urls) if detail_urls and not search_urls else 0,
             'current_url': '',
@@ -1200,7 +1211,7 @@ def run_scraping_task(app, task_id: str) -> None:
                 prog['status'] = 'collecting'
                 combined_urls = list(prog.get('urls') or [])
                 seen = set(combined_urls)
-                parser = SuumoSearchParser(delay=prog['delay'])
+                parser = SuumoSearchParser(delay=prog['delay'], max_results=prog.get('max_results'))
 
                 for idx, search_url in enumerate(search_urls, start=1):
                     prog['current_url'] = search_url
