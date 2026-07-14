@@ -480,6 +480,20 @@ def list_tasks():
     return jsonify({'tasks': result, 'total': total, 'page': page, 'per_page': per_page, 'total_pages': -(-total // per_page)})
 
 
+@api_bp.route('/scrape/cancel/<task_id>', methods=['POST'])
+def cancel_scrape(task_id: str):
+    """Signal a running scrape task to stop after the current URL (best-effort)."""
+    with _progress_lock:
+        prog = _progress.get(task_id)
+        if prog is not None:
+            prog['cancelled'] = True
+    task = db.session.get(ScrapingTask, task_id)
+    if task and task.status in ('pending', 'running'):
+        task.status = 'cancelled'
+        db.session.commit()
+    return jsonify({'ok': True, 'task_id': task_id})
+
+
 @api_bp.route('/tasks/<task_id>', methods=['DELETE'])
 def delete_task(task_id: str):
     """Delete a scraping task"""
@@ -1245,6 +1259,12 @@ def run_scraping_task(app, task_id: str) -> None:
                 db.session.commit()
 
             for i, url in enumerate(prog['urls']):
+                if prog.get('cancelled'):
+                    task.status = 'cancelled'
+                    task.completed_at = datetime.now(timezone.utc)
+                    prog['status'] = 'cancelled'
+                    db.session.commit()
+                    return
                 prog['current_url'] = url
                 prog['progress'] = i
 
