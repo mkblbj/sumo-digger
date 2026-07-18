@@ -1,7 +1,8 @@
 """Tests for Flask routes"""
 
 import pytest
-from app import create_app
+from app import create_app, _fix_zombie_tasks
+from app.models import ScrapingTask, Property, db
 
 
 @pytest.fixture
@@ -112,3 +113,80 @@ class TestApiRoutes:
             'email': 'test@example.com'
         })
         assert response.status_code == 400
+
+
+class TestStartupRecovery:
+    """Test stale task recovery on application startup"""
+
+    def test_zombie_task_with_saved_properties_is_completed(self, app):
+        """A restarted search task with persisted results should stay usable."""
+        with app.app_context():
+            task = ScrapingTask(
+                id='zombie-with-results',
+                status='running',
+                property_type='search',
+                total=500,
+            )
+            db.session.add(task)
+            prop = Property(
+                task_id=task.id,
+                url='https://suumo.jp/chintai/bc_100000000001/',
+                data_json='{"name":"saved property"}',
+            )
+            db.session.add(prop)
+            db.session.commit()
+
+            _fix_zombie_tasks(app)
+
+            refreshed = db.session.get(ScrapingTask, task.id)
+            assert refreshed.status == 'completed'
+            assert refreshed.completed_at is not None
+            assert refreshed.result_count == 1
+            assert refreshed.errors[0]['error'] == 'Task interrupted by server restart'
+
+    def test_failed_restart_task_with_saved_properties_is_completed(self, app):
+        """Previously failed restart-interrupted tasks should be repaired too."""
+        with app.app_context():
+            task = ScrapingTask(
+                id='failed-with-results',
+                status='failed',
+                property_type='search',
+                total=500,
+            )
+            task.errors = [{'url': 'system', 'error': 'Task interrupted by server restart'}]
+            db.session.add(task)
+            prop = Property(
+                task_id=task.id,
+                url='https://suumo.jp/chintai/bc_100000000002/',
+                data_json='{"name":"saved property"}',
+            )
+            db.session.add(prop)
+            db.session.commit()
+
+            _fix_zombie_tasks(app)
+
+            refreshed = db.session.get(ScrapingTask, task.id)
+            assert refreshed.status == 'completed'
+            assert refreshed.completed_at is not None
+            assert refreshed.result_count == 1
+            assert refreshed.errors[0]['error'] == 'Task interrupted by server restart'
+
+    def test_zombie_task_without_saved_properties_is_failed(self, app):
+        """A restarted task with no persisted results is still a hard failure."""
+        with app.app_context():
+            task = ScrapingTask(
+                id='zombie-empty',
+                status='collecting',
+                property_type='search',
+                total=500,
+            )
+            db.session.add(task)
+            db.session.commit()
+
+            _fix_zombie_tasks(app)
+
+            refreshed = db.session.get(ScrapingTask, task.id)
+            assert refreshed.status == 'failed'
+            assert refreshed.completed_at is not None
+            assert refreshed.result_count == 0
+            assert refreshed.errors[0]['error'] == 'Task interrupted by server restart'

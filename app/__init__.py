@@ -60,20 +60,48 @@ def create_app(config_name: str = None) -> Flask:
     return app
 
 
+def _has_restart_interruption(errors) -> bool:
+    for item in errors or []:
+        msg = ''
+        if isinstance(item, dict):
+            msg = str(item.get('error') or item.get('message') or '')
+        else:
+            msg = str(item)
+        if 'server restart' in msg.lower():
+            return True
+    return False
+
+
 def _fix_zombie_tasks(app: Flask) -> None:
-    """Mark stale running/pending tasks as failed on startup."""
+    """Finalize stale running/pending tasks on startup.
+
+    A server restart can interrupt a task after many Property rows have already
+    been committed. Those rows are still usable by the API, so keep that task
+    completed instead of turning it into a hard failure. Also repair tasks that
+    were already marked failed by older versions of this startup recovery.
+    """
     from datetime import datetime, timezone
     from app.models import ScrapingTask
     zombies = ScrapingTask.query.filter(
-        ScrapingTask.status.in_(['running', 'pending', 'collecting'])
+        ScrapingTask.status.in_(['running', 'pending', 'collecting', 'failed'])
     ).all()
     if zombies:
+        now = datetime.now(timezone.utc)
+        fixed_count = 0
         for t in zombies:
-            t.status = 'failed'
-            t.completed_at = datetime.now(timezone.utc)
-            t.errors = [{'url': 'system', 'error': 'Task interrupted by server restart'}]
-        db.session.commit()
-        app.logger.info(f"Fixed {len(zombies)} zombie task(s) from previous run")
+            if t.status in ['running', 'pending', 'collecting']:
+                t.status = 'completed' if t.result_count > 0 else 'failed'
+                t.completed_at = now
+                t.errors = [{'url': 'system', 'error': 'Task interrupted by server restart'}]
+                fixed_count += 1
+            elif t.result_count > 0 and _has_restart_interruption(t.errors):
+                t.status = 'completed'
+                if not t.completed_at:
+                    t.completed_at = now
+                fixed_count += 1
+        if fixed_count:
+            db.session.commit()
+            app.logger.info(f"Fixed {fixed_count} zombie task(s) from previous run")
 
 
 def configure_logging(app: Flask) -> None:
