@@ -84,3 +84,22 @@ def canonical_buy_detail_url(url: str) -> str:
     """买房详情（含子页）→ 规范化详情地址；非买房详情返回空字符串。"""
     info = classify_suumo_url(url)
     return info.url if info.kind == 'buy_detail' else ''
+
+
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+def is_delisted_redirect(response) -> bool:
+    """详情页跳转到楼栋页（/library/）：房源已下架或不存在。
+
+    SUUMO 对已下架的租房详情返回 301，Location 是 http://suumo.jp/library/…；
+    80 端口连不上，跟随跳转只会超时，所以详情请求不跟随跳转，在这里识别。
+    """
+    if response.status_code not in _REDIRECT_STATUSES:
+        return False
+    try:
+        target = urlparse((response.headers.get('Location') or '').strip())
+    except ValueError:
+        return False
+    host = target.hostname or ''
+    return (not host or host in SUUMO_HOSTS) and target.path.startswith('/library/')

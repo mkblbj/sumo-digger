@@ -1308,13 +1308,8 @@ def run_scraping_task(app, task_id: str) -> None:
                             'url': url,
                             'error': 'Could not get property info'
                         })
-                except BuyScraperError as e:
+                except (BuyScraperError, SuumoScraperError) as e:
                     prog['errors'].append({'url': url, 'error': str(e), 'error_type': e.error_type})
-                except SuumoScraperError as e:
-                    prog['errors'].append({
-                        'url': url,
-                        'error': str(e)
-                    })
                 except Exception as e:
                     logger.error(f"Scraping error for {url}: {e}")
                     prog['errors'].append({

@@ -26,17 +26,28 @@ class _Resp:
         self.content = content
 
 
+def _redirect(location, status_code=301):
+    resp = requests.Response()
+    resp.status_code = status_code
+    resp.headers['Location'] = location
+    return resp
+
+
 class _Session:
+    """按顺序返回响应。允许跟随跳转时像线上一样：跳去 http://suumo.jp（80 端口）连接超时。"""
+
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
         self.headers = {}
 
-    def get(self, url, timeout=None):
+    def get(self, url, timeout=None, allow_redirects=True):
         self.calls += 1
         item = self.responses.pop(0)
         if isinstance(item, Exception):
             raise item
+        if allow_redirects and getattr(item, 'is_redirect', False):
+            raise requests.ConnectTimeout("HTTPConnectionPool(host='suumo.jp', port=80): connect timeout")
         return item
 
 
@@ -222,6 +233,30 @@ def test_listing_gone_is_typed():
         scraper.scrape_property(MS_CHUKO_URL)
     assert exc.value.error_type == 'gone'
     assert scraper.session.calls == 1
+
+
+def test_redirect_to_building_page_is_gone_without_following():
+    # 与租房下架相同的跳转：301 到 http 的楼栋页（/library/），跟随只会在 80 端口超时
+    scraper = BuyScraper(retry_delay=0)
+    library = 'http://suumo.jp/library/tf_13/sc_13106/to_1000000000/'
+    scraper.session = _Session([_redirect(library) for _ in range(BuyScraper.RETRIES + 1)])
+
+    with pytest.raises(BuyScraperError) as exc:
+        scraper.scrape_property(MS_CHUKO_URL)
+    assert exc.value.error_type == 'gone'
+    assert str(exc.value) == '房源已下架或不存在（HTTP 301）'
+    assert scraper.session.calls == 1
+
+
+def test_other_redirect_is_not_followed():
+    scraper = BuyScraper(retry_delay=0)
+    search = 'http://suumo.jp/ms/chuko/tokyo/sc_taito/'
+    scraper.session = _Session([_redirect(search, 302) for _ in range(BuyScraper.RETRIES + 1)])
+
+    with pytest.raises(BuyScraperError) as exc:
+        scraper.scrape_property(MS_CHUKO_URL)
+    assert exc.value.error_type == 'temporary'
+    assert str(exc.value) == '详情页暂时访问失败（HTTP 302）'
 
 
 def test_temporary_failures_retry_with_limit():

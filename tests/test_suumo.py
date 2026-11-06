@@ -6,9 +6,12 @@ from bs4 import BeautifulSoup
 
 from app.schema.mapper import FieldMapper
 from app.schema.property_types import PropertyType
-from app.scraper.suumo import SuumoScraper, PropertyData
+from app.scraper.suumo import SuumoScraper, SuumoScraperError, PropertyData
 
 RENTAL_URL = 'https://suumo.jp/chintai/jnc_000110935824/?bc=100535562071'
+# 已下架的租房详情：SUUMO 301 到 http 的楼栋页（线上任务 5144f250 的实际跳转）
+GONE_URL = 'https://suumo.jp/chintai/jnc_000110800080/?bc=100534661075'
+LIBRARY_URL = 'http://suumo.jp/library/tf_12/sc_12223/to_1000901917/?bs=040'
 
 # 租房详情 jnc_000110935824 的基本信息表：間取り与専有面積在同一行（两组 th/td）
 _AREA_ROW_PAGE = """
@@ -208,3 +211,59 @@ def test_scraped_rental_area_is_not_inflated(area_html, expected):
 
     assert normalized['basic.area'] == expected
 
+
+def test_delisted_listing_redirected_to_building_page_is_gone():
+    scraper = SuumoScraper()
+    scraper.session = _Session([_response(301, location=LIBRARY_URL)])
+
+    with pytest.raises(SuumoScraperError) as exc:
+        scraper.scrape_property(GONE_URL)
+
+    assert getattr(exc.value, 'error_type', None) == 'gone'
+    assert str(exc.value) == '房源已下架或不存在（HTTP 301）'
+    assert scraper.session.calls == 1
+
+
+def test_missing_listing_is_gone():
+    scraper = SuumoScraper()
+    scraper.session = _Session([_response(404)])
+
+    with pytest.raises(SuumoScraperError) as exc:
+        scraper.scrape_property(GONE_URL)
+
+    assert getattr(exc.value, 'error_type', None) == 'gone'
+    assert str(exc.value) == '房源已下架或不存在（HTTP 404）'
+
+
+def test_other_redirect_is_neither_followed_nor_called_gone():
+    scraper = SuumoScraper()
+    scraper.session = _Session([_response(302, location='http://suumo.jp/chintai/tokyo/')])
+
+    assert scraper.scrape_property(RENTAL_URL) is None
+    assert scraper.session.calls == 1
+
+
+def test_connection_failure_is_temporary():
+    scraper = SuumoScraper()
+    scraper.session = _Session([requests.ReadTimeout('Read timed out. (read timeout=15)')])
+
+    with pytest.raises(SuumoScraperError) as exc:
+        scraper.scrape_property(RENTAL_URL)
+
+    assert getattr(exc.value, 'error_type', None) == 'temporary'
+
+
+def test_page_parse_failure_is_structure_change(monkeypatch):
+    scraper = SuumoScraper()
+    page = _AREA_ROW_PAGE.format(area='20m<sup>2</sup>').encode('utf-8')
+    scraper.session = _Session([_response(200, page)])
+
+    def broken_layout(soup):
+        raise ValueError('unexpected layout')
+
+    monkeypatch.setattr(scraper, '_extract_table_data', broken_layout)
+
+    with pytest.raises(SuumoScraperError) as exc:
+        scraper.scrape_property(RENTAL_URL)
+
+    assert getattr(exc.value, 'error_type', None) == 'structure'

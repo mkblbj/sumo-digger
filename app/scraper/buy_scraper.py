@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from app.scraper.url_rules import classify_suumo_url
+from app.scraper.url_rules import classify_suumo_url, is_delisted_redirect
 
 logger = logging.getLogger(__name__)
 
@@ -201,20 +201,21 @@ class BuyScraper:
         return ' '.join(text.split())
 
     def _fetch(self, url: str):
-        """GET 详情页：404/410 视为已下架；超时、连接错误、5xx/429/403 按请求间隔有限重试。"""
+        """GET 详情页（不跟随跳转）：404/410 或跳转到楼栋页视为已下架；
+        超时、连接错误、5xx/429/403 及其他跳转按请求间隔有限重试。"""
         last_error = ''
         for attempt in range(self.RETRIES + 1):
             if attempt:
                 time.sleep(self.retry_delay)
             try:
-                response = self.session.get(url, timeout=self.REQUEST_TIMEOUT)
+                response = self.session.get(url, timeout=self.REQUEST_TIMEOUT, allow_redirects=False)
             except requests.RequestException as e:
                 last_error = f'详情页暂时访问失败：{e}'
                 logger.warning(f"Request error for {url} ({attempt + 1}): {e}")
                 continue
             if response.status_code == 200:
                 return response
-            if response.status_code in (404, 410):
+            if response.status_code in (404, 410) or is_delisted_redirect(response):
                 raise BuyScraperError(f'房源已下架或不存在（HTTP {response.status_code}）', 'gone')
             last_error = f'详情页暂时访问失败（HTTP {response.status_code}）'
             logger.warning(f"HTTP {response.status_code} for {url} ({attempt + 1})")

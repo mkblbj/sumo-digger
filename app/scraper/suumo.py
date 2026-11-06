@@ -18,12 +18,17 @@ from dataclasses import dataclass, field
 import requests
 from bs4 import BeautifulSoup
 
+from app.scraper.url_rules import is_delisted_redirect
+
 logger = logging.getLogger(__name__)
 
 
 class SuumoScraperError(Exception):
-    """Custom exception for scraping errors"""
-    pass
+    """租房抓取错误。error_type: gone(已下架/不存在) / temporary(暂时访问失败) / structure(页面结构变更)。"""
+
+    def __init__(self, message: str, error_type: str = 'temporary'):
+        super().__init__(message)
+        self.error_type = error_type
 
 
 @dataclass
@@ -126,9 +131,14 @@ class SuumoScraper:
             return None
 
         try:
-            response = self.session.get(url, timeout=self.REQUEST_TIMEOUT)
+            # 不跟随跳转：已下架的详情会 301 到 http 的楼栋页，跟随只会在 80 端口超时
+            response = self.session.get(url, timeout=self.REQUEST_TIMEOUT, allow_redirects=False)
+            if response.status_code in (404, 410) or is_delisted_redirect(response):
+                raise SuumoScraperError(f'房源已下架或不存在（HTTP {response.status_code}）', 'gone')
             if response.status_code != 200:
-                logger.error(f"HTTP error {response.status_code} for {url}")
+                location = response.headers.get('Location')
+                logger.error(f"HTTP error {response.status_code} for {url}"
+                             + (f" -> {location}" if location else ''))
                 return None
 
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -170,12 +180,14 @@ class SuumoScraper:
             logger.info(f"Successfully scraped: {url} ({len(data.image_urls)} images)")
             return data
 
+        except SuumoScraperError:
+            raise
         except requests.RequestException as e:
             logger.error(f"Request error for {url}: {e}")
             raise SuumoScraperError(f"Request error: {e}")
         except Exception as e:
             logger.error(f"Scraping error for {url}: {e}")
-            raise SuumoScraperError(f"Scraping error: {e}")
+            raise SuumoScraperError(f"Scraping error: {e}", 'structure')
 
     # ── Extraction methods ──────────────────────────────────
 

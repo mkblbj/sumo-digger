@@ -8,7 +8,7 @@ import requests
 from app import create_app
 from app.routes import _classify_urls
 from app.scraper.search_parser import SuumoSearchParser
-from app.scraper.url_rules import classify_suumo_url
+from app.scraper.url_rules import classify_suumo_url, is_delisted_redirect
 
 FIXTURES = Path(__file__).parent / 'fixtures' / 'suumo_buy'
 
@@ -98,6 +98,21 @@ def test_rental_urls_keep_previous_classification():
     ]
     assert search_urls == ['https://suumo.jp/jj/chintai/ichiran/FR301FC001/?ar=030&bs=040&ta=13']
     assert invalid_urls == ['https://example.com/ms/chuko/tokyo/sc_taito/nc_21853112/']
+
+
+@pytest.mark.parametrize('status_code,location,expected', [
+    (301, 'http://suumo.jp/library/tf_12/sc_12223/to_1000901917/?bs=040', True),
+    (302, '/library/tf_13/sc_13116/to_1001022832/', True),
+    (301, 'https://suumo.jp/chintai/tokyo/', False),
+    (301, 'https://example.com/library/tf_13/', False),
+    (200, None, False),
+])
+def test_delisted_redirect_means_jump_to_building_page(status_code, location, expected):
+    resp = requests.Response()
+    resp.status_code = status_code
+    if location:
+        resp.headers['Location'] = location
+    assert is_delisted_redirect(resp) is expected
 
 
 class _FakeResponse:
