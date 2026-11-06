@@ -1,9 +1,58 @@
 """Tests for SUUMO scraper module"""
 
 import pytest
+import requests
 from bs4 import BeautifulSoup
 
+from app.schema.mapper import FieldMapper
+from app.schema.property_types import PropertyType
 from app.scraper.suumo import SuumoScraper, PropertyData
+
+RENTAL_URL = 'https://suumo.jp/chintai/jnc_000110935824/?bc=100535562071'
+
+# 租房详情 jnc_000110935824 的基本信息表：間取り与専有面積在同一行（两组 th/td）
+_AREA_ROW_PAGE = """
+<html><body>
+  <div class="section_h1">
+    <h1 class="section_h1-header-title">テスト物件</h1>
+    <table class="property_view_table">
+      <tr>
+        <th class="property_view_table-title">間取り</th>
+        <td class="property_view_table-body">ワンルーム</td>
+        <th class="property_view_table-title">専有面積</th>
+        <td class="property_view_table-body">{area}</td>
+      </tr>
+    </table>
+  </div>
+</body></html>
+"""
+
+
+def _response(status_code, content=b'', location=None):
+    resp = requests.Response()
+    resp.status_code = status_code
+    resp._content = content
+    if location:
+        resp.headers['Location'] = location
+    return resp
+
+
+class _Session:
+    """按顺序返回响应。允许跟随跳转时像线上一样：跳去 http://suumo.jp（80 端口）连接超时。"""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+        self.headers = {}
+
+    def get(self, url, timeout=None, allow_redirects=True):
+        self.calls += 1
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        if allow_redirects and item.is_redirect:
+            raise requests.ConnectTimeout("HTTPConnectionPool(host='suumo.jp', port=80): connect timeout")
+        return item
 
 
 class TestSuumoScraper:
@@ -136,3 +185,26 @@ def test_extract_table_data_reads_basic_property_table():
     assert data['所在地'] == '東京都新宿区早稲田鶴巻町'
     assert data['駅徒歩'] == '東京メトロ東西線/早稲田駅 歩10分'
     assert data['階'] == '1階/3階建'
+
+
+def test_two_column_row_keeps_area_superscript_as_square_metre_sign():
+    html = _AREA_ROW_PAGE.format(area='20m<sup>2</sup>')
+    data = SuumoScraper()._extract_table_data(BeautifulSoup(html, 'html.parser'))
+    assert data['間取り'] == 'ワンルーム'
+    assert data['専有面積'] == '20m²'
+
+
+@pytest.mark.parametrize('area_html,expected', [
+    ('20m<sup>2</sup>', 20),
+    ('21.04m<sup>2</sup>', 21.04),
+])
+def test_scraped_rental_area_is_not_inflated(area_html, expected):
+    scraper = SuumoScraper()
+    page = _AREA_ROW_PAGE.format(area=area_html).encode('utf-8')
+    scraper.session = _Session([_response(200, page)])
+
+    result = scraper.scrape_property(RENTAL_URL)
+    normalized = FieldMapper().normalize(result.to_dict(), PropertyType.RENTAL, source_url=RENTAL_URL)
+
+    assert normalized['basic.area'] == expected
+

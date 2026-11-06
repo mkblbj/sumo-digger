@@ -192,6 +192,8 @@ def convert_layout(jp_layout: str) -> str:
 # ── Numeric cleaning ─────────────────────────────────────────────────────
 
 _UNIT_RE = re.compile(r'[万億円㎡m²坪帖畳階建戸室棟%％]')
+# 平方米单位整体去掉：网页 m<sup>2</sup> 读成文本是「m2」，只删 m 会把 2 并进数值（20m2 → 202）
+_SQM_UNIT_RE = re.compile(r'(?<=\d)\s*(?:m\s*[2²]|㎡)')
 _MAN_RE = re.compile(r'([\d,.]+)\s*万')
 _FLOOR_TOTAL_RE = re.compile(r'(\d+)\s*階建')
 _FLOOR_CURRENT_RE = re.compile(r'(\d+)\s*階(?:部分)?(?!建)')
@@ -216,6 +218,7 @@ def clean_number(text: str, *, to_man_yen: bool = False) -> Optional[Any]:
                 return int(float(m.group(1)) * 10000)
             except ValueError:
                 pass
+    text = _SQM_UNIT_RE.sub(' ', text)
     cleaned = _UNIT_RE.sub('', text).strip()
     number_match = re.search(r'-?\d+(?:\.\d+)?', cleaned)
     if number_match:

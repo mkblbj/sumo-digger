@@ -316,6 +316,11 @@ class SuumoScraper:
 
     def _parse_table_row(self, row, data: Dict[str, str]) -> None:
         """Parse a single <tr> and add key-value pairs to data dict."""
+        # m<sup>2</sup> 记为 m²（与 BuyScraper 一致），否则取文本会拼成「20m2」
+        for sup in row.select('td sup'):
+            text = sup.get_text(strip=True)
+            sup.replace_with('²' if text == '2' else text)
+        row.smooth()
         headers = row.find_all('th')
         values = row.find_all('td')
 
