@@ -2,19 +2,37 @@
 """SUUMO Buy Property (买卖类物件) Scraping Module"""
 
 import re
+import copy
+import time
 import logging
+import unicodedata
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+
+from app.scraper.url_rules import classify_suumo_url
 
 logger = logging.getLogger(__name__)
 
 
 class BuyScraperError(Exception):
-    """Custom exception for buy scraping errors"""
-    pass
+    """买房抓取错误。error_type: gone(已下架/不存在) / temporary(暂时访问失败) / structure(页面结构变更)。"""
+
+    def __init__(self, message: str, error_type: str = 'temporary'):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+# 表头里的「ヒント」提示节点、值单元格里的乗り換え案内/支払シミュレーション/周辺環境链接
+_HINT_SELECTOR = '.icBeginner2, a[id^="jsiHint"], input'
+_VALUE_NOISE_SELECTOR = 'ul.cf, form, input, script, style'
+_VALUE_NOISE_TEXT_RE = re.compile(r'支払シミュレーション|周辺環境|乗り換え案内')
+_LINE_MARK = '\ue000'
+_NOISE_LINES = {'[', ']', '[]', '□', '■'}
+_H1_PRICE_TAIL_RE = re.compile(r'\s*[\d,.]+\s*(?:億\s*[\d,.]*\s*)?万?円.*$')
 
 
 @dataclass
@@ -146,9 +164,13 @@ class BuyScraper:
 
     REQUEST_TIMEOUT = 10
 
-    def __init__(self):
+    # 暂时访问失败（超时、连接错误、5xx/429/403）按请求间隔重试的次数
+    RETRIES = 2
+
+    def __init__(self, retry_delay: float = 2.0):
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
+        self.retry_delay = retry_delay
 
     @staticmethod
     def is_buy_url(url: str) -> bool:
@@ -178,14 +200,30 @@ class BuyScraper:
             return ""
         return ' '.join(text.split())
 
+    def _fetch(self, url: str):
+        """GET 详情页：404/410 视为已下架；超时、连接错误、5xx/429/403 按请求间隔有限重试。"""
+        last_error = ''
+        for attempt in range(self.RETRIES + 1):
+            if attempt:
+                time.sleep(self.retry_delay)
+            try:
+                response = self.session.get(url, timeout=self.REQUEST_TIMEOUT)
+            except requests.RequestException as e:
+                last_error = f'详情页暂时访问失败：{e}'
+                logger.warning(f"Request error for {url} ({attempt + 1}): {e}")
+                continue
+            if response.status_code == 200:
+                return response
+            if response.status_code in (404, 410):
+                raise BuyScraperError(f'房源已下架或不存在（HTTP {response.status_code}）', 'gone')
+            last_error = f'详情页暂时访问失败（HTTP {response.status_code}）'
+            logger.warning(f"HTTP {response.status_code} for {url} ({attempt + 1})")
+        raise BuyScraperError(last_error or '详情页暂时访问失败', 'temporary')
+
     def scrape_property(self, url: str) -> Optional[BuyPropertyData]:
         """Scrape a buy property page"""
+        response = self._fetch(url)
         try:
-            response = self.session.get(url, timeout=self.REQUEST_TIMEOUT)
-            if response.status_code != 200:
-                logger.error(f"HTTP {response.status_code} for {url}")
-                return None
-
             soup = BeautifulSoup(response.content, 'html.parser')
             prop_type = self.detect_type(url)
 
@@ -194,36 +232,34 @@ class BuyScraper:
                 property_type=prop_type,
             )
 
-            # Property name
-            h1 = soup.find('h1', class_='section_h1-header-title')
-            if not h1:
-                h1 = soup.find('h1')
-            data.property_name = self.clean_text(h1.text) if h1 else ''
-
-            # Price
-            price_el = soup.find('div', class_='property_view_main-emphasis')
-            if not price_el:
-                price_el = soup.find('span', class_='dottable-value--emphasis')
-            data.price = self.clean_text(price_el.text) if price_el else ''
-
             # Extract all table data first (robust)
             data.table_data = self._extract_table_data(soup)
+            if not any(k in data.table_data for k in ('価格', '販売価格', '専有面積', '土地面積', '建物面積')):
+                raise BuyScraperError('详情页未读到售价与面积表，页面结构可能已变更', 'structure')
+
+            data.property_name = self._property_name(soup, data.table_data)
+            data.price = data.table_data.get('価格', '') or data.table_data.get('販売価格', '')
 
             # Populate from table_data
             data.layout = data.table_data.get('間取り', '')
             data.exclusive_area = data.table_data.get('専有面積', '')
             data.land_area = data.table_data.get('土地面積', '')
             data.building_area = data.table_data.get('建物面積', '')
-            data.building_type = data.table_data.get('建物種別', '') or data.table_data.get('構造', '')
-            data.age = data.table_data.get('築年月', '') or data.table_data.get('築年数', '')
-            data.floor = data.table_data.get('所在階', '') or data.table_data.get('階', '')
+            data.building_type = data.table_data.get('建物種別', '')
+            data.age = data.table_data.get('築年月', '') or data.table_data.get('完成時期(築年月)', '')
+            data.floor = data.table_data.get('所在階', '')
             data.total_floors = data.table_data.get('階建', '') or data.table_data.get('総階数', '')
             data.direction = data.table_data.get('向き', '')
             data.structure = data.table_data.get('構造', '')
             data.management_fee = data.table_data.get('管理費', '') or data.table_data.get('管理費等', '')
             data.repair_reserve = data.table_data.get('修繕積立金', '')
             data.current_status = data.table_data.get('現況', '')
-            data.delivery_time = data.table_data.get('引渡し時期', '') or data.table_data.get('引渡時期', '')
+            data.delivery_time = (
+                data.table_data.get('引渡可能時期', '')
+                or data.table_data.get('引き渡し時期', '')
+                or data.table_data.get('引渡し時期', '')
+                or data.table_data.get('引渡時期', '')
+            )
             data.transaction_type = data.table_data.get('取引態様', '')
             data.total_units = data.table_data.get('総戸数', '') or data.table_data.get('総区画数', '')
             data.management_method = data.table_data.get('管理形態', '') or data.table_data.get('管理方式', '')
@@ -233,29 +269,19 @@ class BuyScraper:
             data.zoning = data.table_data.get('用途地域', '')
             data.building_coverage = data.table_data.get('建ぺい率', '')
             data.floor_area_ratio = data.table_data.get('容積率', '')
-            data.land_rights = data.table_data.get('土地権利', '') or data.table_data.get('権利形態', '')
-            data.private_road = data.table_data.get('私道負担', '')
+            data.land_rights = (
+                data.table_data.get('土地権利', '')
+                or data.table_data.get('土地の権利形態', '')
+                or data.table_data.get('敷地の権利形態', '')
+                or data.table_data.get('権利形態', '')
+            )
+            data.private_road = data.table_data.get('私道負担', '') or data.table_data.get('私道負担・道路', '')
             data.restrictions = (
                 data.table_data.get('法令上の制限', '')
                 or data.table_data.get('その他制限事項', '')
                 or data.table_data.get('制限事項', '')
             )
             data.seismic = data.table_data.get('耐震構造', '') or data.table_data.get('耐震', '')
-
-            # Also try extracting from div-based layout (similar to rental)
-            for label_text, attr in [
-                ('間取り', 'layout'),
-                ('専有面積', 'exclusive_area'),
-                ('向き', 'direction'),
-                ('建物種別', 'building_type'),
-                ('築年数', 'age'),
-            ]:
-                if not getattr(data, attr):
-                    tag = soup.find('div', string=label_text)
-                    if tag:
-                        next_div = tag.find_next('div')
-                        if next_div:
-                            setattr(data, attr, self.clean_text(next_div.text))
 
             data.location = self._extract_location(soup, data.table_data)
             data.access_info = self._extract_access_info(soup, data.table_data)
@@ -264,44 +290,87 @@ class BuyScraper:
             data.features = self._extract_features(soup)
 
             # Images
-            data.image_urls = self._extract_image_urls(soup)
+            data.image_urls = self._extract_image_urls(soup, classify_suumo_url(url).property_id)
             data.video_urls = self._extract_video_urls(soup)
             data.vr_links = self._extract_vr_links(soup)
 
             logger.info(f"Successfully scraped buy property: {url}")
             return data
 
-        except requests.RequestException as e:
-            logger.error(f"Request error for {url}: {e}")
-            raise BuyScraperError(f"Request error: {e}")
+        except BuyScraperError:
+            raise
         except Exception as e:
             logger.error(f"Scraping error for {url}: {e}")
-            raise BuyScraperError(f"Scraping error: {e}")
+            raise BuyScraperError(f"Scraping error: {e}", 'structure')
+
+    @staticmethod
+    def _label(cell) -> str:
+        """表头文字：去掉「ヒント」提示节点，NFKC 统一全/半角（完成時期（築年月）→ 完成時期(築年月)）。"""
+        cell = copy.copy(cell)
+        for el in cell.select(_HINT_SELECTOR):
+            el.decompose()
+        text = unicodedata.normalize('NFKC', cell.get_text('', strip=True))
+        return re.sub(r'\s+', '', text).replace('ヒント', '')
+
+    @staticmethod
+    def _value(cell) -> str:
+        """值单元格：去掉换乘/贷款试算/周边环境等链接，m<sup>2</sup> 记为 m²，只在 br/块级元素处分行。"""
+        cell = copy.copy(cell)
+        for el in cell.select(_VALUE_NOISE_SELECTOR):
+            el.decompose()
+        for p in cell.find_all('p'):
+            if _VALUE_NOISE_TEXT_RE.search(p.get_text()):
+                p.decompose()
+        for sup in cell.find_all('sup'):
+            sup.replace_with('²' if sup.get_text(strip=True) == '2' else sup.get_text(strip=True))
+        for br in cell.find_all('br'):
+            br.replace_with(_LINE_MARK)
+        for block in cell.find_all(['div', 'p', 'li']):
+            block.insert_after(_LINE_MARK)
+        text = re.sub(r'\s+', ' ', cell.get_text(''))
+        text = re.sub(r'm\s*²', 'm²', text)
+        lines = []
+        for line in text.split(_LINE_MARK):
+            line = line.strip()
+            if not line or line in _NOISE_LINES or _VALUE_NOISE_TEXT_RE.fullmatch(line.strip('[] □■')):
+                continue
+            lines.append(line)
+        return '\n'.join(lines)
+
+    def _property_name(self, soup: BeautifulSoup, table_data: Dict[str, str]) -> str:
+        name = table_data.get('物件名', '')
+        if name:
+            return name
+        h1 = soup.find('h1', class_='section_h1-header-title') or soup.find('h1')
+        text = self.clean_text(h1.get_text(' ', strip=True)) if h1 else ''
+        return _H1_PRICE_TAIL_RE.sub('', text).strip() or text
+
 
     def _extract_table_data(self, soup: BeautifulSoup) -> Dict[str, str]:
-        """Extract all key-value pairs from tables"""
+        """Extract all key-value pairs from tables（同名标签以首次出现的非空值为准）"""
         data: Dict[str, str] = {}
+
+        def put(label: str, value: str) -> None:
+            if label and value and not data.get(label):
+                data[label] = value
+
         for row in soup.select('tr'):
             headers = row.find_all('th')
             values = row.find_all('td')
             if len(headers) == 2 and len(values) >= 2:
-                data[headers[0].get_text(strip=True)] = values[0].get_text('\n', strip=True)
-                data[headers[1].get_text(strip=True)] = values[1].get_text('\n', strip=True)
+                put(self._label(headers[0]), self._value(values[0]))
+                put(self._label(headers[1]), self._value(values[1]))
             elif len(headers) == 1 and len(values) >= 1:
-                key = headers[0].get_text(strip=True)
-                if values[0].find('li'):
-                    val = '\n'.join(li.get_text(' ', strip=True) for li in values[0].find_all('li'))
-                else:
-                    val = values[0].get_text('\n', strip=True)
-                data[key] = val
+                put(self._label(headers[0]), self._value(values[0]))
 
         # Also extract from dottable format (used in some buy pages)
         for dt in soup.select('dt.dottable-title, div.dottable-title'):
             dd = dt.find_next_sibling('dd') or dt.find_next('dd')
             if dd:
-                data[dt.get_text(strip=True)] = dd.get_text('\n', strip=True)
+                put(self._label(dt), self._value(dd))
 
         return data
+
 
     def _extract_location(self, soup: BeautifulSoup, table_data: Dict[str, str]) -> str:
         selectors = [
@@ -375,33 +444,47 @@ class BuyScraper:
             return f'https://suumo.jp{url}'
         return url
 
-    def _extract_image_urls(self, soup: BeautifulSoup) -> List[str]:
-        """Extract image URLs"""
+    @staticmethod
+    def _original_gallery_url(value: str) -> str:
+        """图库地址 → img01.suumo.com/front/gazo/... 原图地址（与日宜找房图片转存白名单一致）。"""
+        if not value:
+            return ''
+        if value.startswith('//'):
+            value = 'https:' + value
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return ''
+        host = parsed.hostname or ''
+        if not host.endswith('suumo.com') and not host.endswith('suumo.jp'):
+            return ''
+        if parsed.path.endswith('/resizeImage'):
+            src = parse_qs(parsed.query).get('src', [''])[0]
+            path = unquote(src).lstrip('/')
+            return f'https://img01.suumo.com/front/{path}' if path.startswith('gazo/') else ''
+        if parsed.path.startswith('/front/gazo/'):
+            return f'https://img01.suumo.com{parsed.path}'
+        return ''
+
+    def _extract_image_urls(self, soup: BeautifulSoup, property_id: str = '') -> List[str]:
+        """图库里本房源的房源图与户型图（排除公司、担当者等其他图片），按页面顺序去重。"""
         urls: List[str] = []
         seen = set()
-
-        for img in soup.select(
-            'div.property_view_gallery img, div.property_view_photo img, div.bukkenGallery img, '
-            '.slick-slide img, .carousel img, img[src*="img.suumo.jp"], img[data-src*="img.suumo.jp"]'
-        ):
-            src = self._normalize_asset_url(img.get('data-src') or img.get('src') or '')
-            if src and 'suumo.jp' in src and src not in seen:
-                src = re.sub(r'/resize/', '/original/', src)
-                urls.append(src)
-                seen.add(src)
-        og = soup.find('meta', property='og:image')
-        if og:
-            src = self._normalize_asset_url(og.get('content', ''))
-            if src and src not in seen:
-                urls.append(src)
-                seen.add(src)
-        if not urls:
-            for img in soup.select('img[src*="img.suumo.jp"]'):
-                src = self._normalize_asset_url(img.get('src', ''))
-                if src and src not in seen and 'icon' not in src.lower() and 'logo' not in src.lower():
-                    urls.append(src)
-                    seen.add(src)
+        marker = f'/{property_id}/' if property_id else ''
+        for img in soup.find_all('img'):
+            for attr in ('rel', 'data-src', 'src'):
+                raw = img.get(attr) or ''
+                if isinstance(raw, list):
+                    raw = ' '.join(raw)
+                url = self._original_gallery_url(raw.strip())
+                if not url or '/gazo/bukken/' not in url or (marker and marker not in url):
+                    continue
+                if url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+                break
         return urls
+
 
     def _extract_video_urls(self, soup: BeautifulSoup) -> List[str]:
         urls: List[str] = []

@@ -7,6 +7,7 @@ collect individual property detail URLs up to a configurable limit.
 """
 
 import re
+import time
 import logging
 from typing import List
 from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
@@ -14,13 +15,23 @@ from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
+from app.scraper.url_rules import canonical_buy_detail_url
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RESULTS = None
 
 
 class SearchParserError(Exception):
-    pass
+    """搜索页错误。error_type: gone(页面不存在) / temporary(暂时访问失败) / invalid(非搜索链接)。"""
+
+    def __init__(self, message: str, error_type: str = 'temporary'):
+        super().__init__(message)
+        self.error_type = error_type
+
+
+_EMPTY_HIT_RE = re.compile(r'^\s*0\s*件')
+_NO_RESULT_TEXT_RE = re.compile(r'該当する物件(?:は|が)?(?:ありません|見つかりません)')
 
 
 class SuumoSearchParser:
@@ -50,11 +61,16 @@ class SuumoSearchParser:
 
     TIMEOUT = 15
 
+    # 暂时访问失败（超时、连接错误、5xx/429/403）按请求间隔重试的次数
+    RETRIES = 2
+
     def __init__(self, max_results: int | None = DEFAULT_MAX_RESULTS, delay: float = 2.0):
         self.max_results = max_results if max_results and max_results > 0 else None
         self.delay = delay
         self.session = requests.Session()
         self.session.headers.update(self.DEFAULT_HEADERS)
+        # 最近一次 collect_urls 的非致命问题：[{url, error, error_type}]，error_type 为 empty/structure/temporary
+        self.issues: List[dict] = []
 
     @classmethod
     def is_search_url(cls, url: str) -> bool:
@@ -65,6 +81,10 @@ class SuumoSearchParser:
         Collect property detail URLs from a SUUMO search result page.
         Paginates automatically until no more pages, unless max_results is set.
 
+        只收录结果卡片里的详情，保持结果顺序；达到上限、到末页或遇到重复页时停止。
+        第一页取不到时抛出带 error_type 的 SearchParserError；后续页暂时失败时
+        保留已收集的结果，并把原因记入 self.issues。
+
         Args:
             search_url: SUUMO search result page URL
             progress_callback: optional fn(collected_count, page_number)
@@ -72,8 +92,9 @@ class SuumoSearchParser:
         Returns:
             List of property detail URLs
         """
+        self.issues = []
         if not self.is_search_url(search_url):
-            raise SearchParserError(f"Not a recognized SUUMO search URL: {search_url}")
+            raise SearchParserError(f"Not a recognized SUUMO search URL: {search_url}", 'invalid')
 
         collected: List[str] = []
         seen = set()
@@ -84,48 +105,76 @@ class SuumoSearchParser:
             logger.info(f"Fetching search page {page}: {page_url}")
 
             try:
-                resp = self.session.get(page_url, timeout=self.TIMEOUT)
-                if resp.status_code != 200:
-                    logger.warning(f"Search page returned {resp.status_code}")
-                    break
+                resp = self._fetch(page_url)
+            except SearchParserError as e:
+                if page == 1:
+                    raise
+                self.issues.append({'url': page_url, 'error': str(e), 'error_type': e.error_type})
+                break
 
-                soup = BeautifulSoup(resp.content, 'html.parser')
-                detail_urls = self._extract_detail_urls(soup)
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            detail_urls = self._extract_detail_urls(soup)
 
-                if not detail_urls:
-                    logger.info(f"No more results on page {page}")
-                    break
+            if not detail_urls:
+                if page == 1:
+                    self.issues.append(self._empty_page_issue(soup, page_url))
+                logger.info(f"No more results on page {page}")
+                break
 
-                added_this_page = 0
-                for url in detail_urls:
-                    if url not in seen and (self.max_results is None or len(collected) < self.max_results):
-                        seen.add(url)
-                        collected.append(url)
-                        added_this_page += 1
+            added_this_page = 0
+            for url in detail_urls:
+                if url not in seen and (self.max_results is None or len(collected) < self.max_results):
+                    seen.add(url)
+                    collected.append(url)
+                    added_this_page += 1
 
-                # Avoid infinite pagination if SUUMO repeats the last/result page.
-                if added_this_page == 0:
-                    logger.info(f"No new results on page {page}")
-                    break
+            # Avoid infinite pagination if SUUMO repeats the last/result page.
+            if added_this_page == 0:
+                logger.info(f"No new results on page {page}")
+                break
 
-                if progress_callback:
-                    progress_callback(len(collected), page)
+            if progress_callback:
+                progress_callback(len(collected), page)
 
-                if not self._has_next_page(soup):
-                    break
+            if not self._has_next_page(soup):
+                break
 
-                page += 1
+            page += 1
 
-                # Polite delay
-                import time
-                time.sleep(self.delay)
-
-            except requests.RequestException as e:
-                logger.error(f"Search page request error: {e}")
-                raise SearchParserError(f"Failed to fetch search page: {e}")
+            # Polite delay
+            time.sleep(self.delay)
 
         logger.info(f"Collected {len(collected)} property URLs from {page} pages")
         return collected
+
+    def _fetch(self, url: str):
+        """GET 一页：404/410 视为不存在；超时、连接错误、5xx/429/403 按请求间隔有限重试。"""
+        last_error = ''
+        for attempt in range(self.RETRIES + 1):
+            if attempt:
+                time.sleep(self.delay)
+            try:
+                resp = self.session.get(url, timeout=self.TIMEOUT)
+            except requests.RequestException as e:
+                last_error = f'搜索页暂时访问失败：{e}'
+                logger.warning(f"Search page request error ({attempt + 1}): {e}")
+                continue
+            if resp.status_code == 200:
+                return resp
+            if resp.status_code in (404, 410):
+                raise SearchParserError(f'搜索页不存在（HTTP {resp.status_code}）', 'gone')
+            last_error = f'搜索页暂时访问失败（HTTP {resp.status_code}）'
+            logger.warning(f"Search page returned {resp.status_code} ({attempt + 1})")
+        raise SearchParserError(last_error or '搜索页暂时访问失败', 'temporary')
+
+    @staticmethod
+    def _empty_page_issue(soup: BeautifulSoup, page_url: str) -> dict:
+        hit = soup.select_one('.pagination_set-hit, .paginate_set-hit')
+        empty_hit = bool(hit and _EMPTY_HIT_RE.match(hit.get_text(' ', strip=True)))
+        # 租房等页面没有件数栏时，按页面的「没有符合条件的物件」提示判断
+        if empty_hit or _NO_RESULT_TEXT_RE.search(soup.get_text(' ', strip=True)):
+            return {'url': page_url, 'error': '搜索结果为空', 'error_type': 'empty'}
+        return {'url': page_url, 'error': '搜索页未找到结果卡片，页面结构可能已变更', 'error_type': 'structure'}
 
     def _build_page_url(self, base_url: str, page: int) -> str:
         """Build paginated URL. SUUMO uses 'page' query parameter."""
@@ -146,9 +195,12 @@ class SuumoSearchParser:
         return urlunparse(parsed._replace(query=new_query))
 
     def _extract_detail_urls(self, soup: BeautifulSoup) -> List[str]:
-        """Extract property detail URLs from a search result page."""
+        """Extract property detail URLs from a search result page.
+
+        买房只读结果卡片（.property_unit）的详情链接，并归并成规范化详情地址；
+        不再在整页里兜底收集 nc_ 链接，避免把详情页的周边/概要/店铺子页当成结果。
+        """
         urls = []
-        buy_segments = ('ms', 'ikkodate', 'chukoikkodate', 'tochi', 'toushi')
 
         # Strategy 1: rental detail links from cassette cards
         for a in soup.select('a.js-cassette_link_href[href], a.js-cassette_link[href]'):
@@ -158,35 +210,14 @@ class SuumoSearchParser:
                 if url:
                     urls.append(url)
 
-        # Strategy 2: property title links on buy/sell result pages
-        for a in soup.select('.property_unit-title a[href], h2.property_unit-title a[href]'):
-            href = a.get('href', '')
-            if (
-                href
-                and '/ichiran/' not in href
-                and '/jj/' not in href
-                and '/rooms/' not in href
-                and any(f'/{segment}/' in href for segment in buy_segments)
-            ):
-                url = self._normalize_url(href)
-                if url:
-                    urls.append(url)
-
-        # Strategy 3: generic fallback for buy/sell detail pages using nc_ marker
-        if not urls:
-            for a in soup.find_all('a', href=True):
-                href = a.get('href', '')
-                if (
-                    href
-                    and '/ichiran/' not in href
-                    and '/jj/' not in href
-                    and '/rooms/' not in href
-                    and 'nc_' in href
-                    and any(f'/{segment}/' in href for segment in buy_segments)
-                ):
-                    url = self._normalize_url(href)
-                    if url:
-                        urls.append(url)
+        # Strategy 2: buy result cards → canonical detail URLs
+        card_links = soup.select('.property_unit .property_unit-title a[href], h2.property_unit-title a[href]')
+        if not card_links:
+            card_links = soup.select('#js-bukkenList .property_unit a[href]')
+        for a in card_links:
+            detail = canonical_buy_detail_url(self._normalize_url(a.get('href', '')))
+            if detail:
+                urls.append(detail)
 
         # Deduplicate while preserving order
         seen = set()

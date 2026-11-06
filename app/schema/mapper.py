@@ -21,6 +21,7 @@ from app.schema.field_definitions import (
     get_field_definitions, get_all_keys, get_key_to_label, Section,
 )
 from app.schema import enums as E
+from app.schema.buy_normalizer import normalize_buy_fields
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ _JP_KEY_MAP: Dict[str, str] = {
     'その他制限事項': 'land.restrictions',
     '制限事項': 'land.restrictions',
     '販売価格（税込）': 'basic.price_jpy',
+    '販売価格(税込)': 'basic.price_jpy',  # BuyScraper 表头经 NFKC 后的写法
     '售价（日元）': 'basic.price_jpy',
     '物件价格': 'analysis.property_price',
     '専有面積(壁芯)': 'detail.exclusive_area',
@@ -106,6 +108,7 @@ _JP_KEY_MAP: Dict[str, str] = {
     '所在楼层': 'detail.floor',
     '总楼层': 'detail.total_floors',
     '管理方式（通勤）': 'management.method',
+    '管理方式(通勤)': 'management.method',
     '管理形態': 'management.method',
     '物件介紹': 'ai.description_candidates',
     '物件介绍': 'ai.description_candidates',
@@ -123,6 +126,13 @@ _JP_KEY_MAP: Dict[str, str] = {
     '情報更新日': '_raw.update_date',
     '次回更新予定日': '_raw.next_update',
     '次回更新日': '_raw.next_update',
+    # SUUMO 买房物件表（表头经 NFKC 统一，见 BuyScraper._label）
+    '完成時期(築年月)': 'basic.built_month',
+    '土地の権利形態': 'land.rights',
+    '敷地の権利形態': 'land.rights',
+    '私道負担・道路': 'land.private_road_burden',
+    '土地状況': 'detail.land_or_invest_status',
+    'その他面積': 'detail.other_areas',
     # Access from rental scraper: stored separately
     'アクセス1': '_access.0',
     'アクセス2': '_access.1',
@@ -282,7 +292,7 @@ def detect_property_type(url: str = '', raw_data: Optional[Dict] = None) -> Prop
         return PropertyType.INVESTMENT
     if '/ms/' in url:
         return PropertyType.MANSION
-    if '/ikkodate/' in url:
+    if '/ikkodate/' in url or '/chukoikkodate/' in url:
         return PropertyType.HOUSE
 
     # Data-based detection
@@ -320,6 +330,8 @@ def detect_property_type(url: str = '', raw_data: Optional[Dict] = None) -> Prop
 
 # ── Main mapper class ────────────────────────────────────────────────────
 
+_BUY_TYPES = {PropertyType.LAND, PropertyType.MANSION, PropertyType.HOUSE, PropertyType.INVESTMENT}
+
 class FieldMapper:
     """Normalize raw scraper/PDF data to customer-spec field schema."""
 
@@ -331,6 +343,8 @@ class FieldMapper:
         present (missing ones set to None).
         """
         mapped = self._map_keys(raw_data, property_type)
+        if property_type in _BUY_TYPES:
+            mapped = normalize_buy_fields(mapped, raw_data, property_type, source_url)
         mapped = self._convert_enums(mapped, property_type)
         mapped = self._normalize_rental_floor_semantics(mapped, property_type)
         mapped = self._convert_layout(mapped)

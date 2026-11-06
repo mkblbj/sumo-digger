@@ -109,6 +109,9 @@ class AIEnrichmentService:
             data['basic.price_cny'] = int(source * self.exchange_rate)
 
     def _calc_unit_price(self, data: Dict[str, Any], ptype: PropertyType) -> None:
+        # 买房映射已按「明确售价 ÷ 对应面积」算出整数日元/㎡ 时不覆盖
+        if data.get('basic.unit_price') is not None:
+            return
         price = data.get('basic.price_jpy')
         if not price:
             return

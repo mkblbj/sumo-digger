@@ -24,6 +24,7 @@ from app.models import db, ScrapingTask, Property, Settings
 from app.scraper.suumo import SuumoScraper, SuumoScraperError, PropertyData
 from app.scraper.buy_scraper import BuyScraper, BuyScraperError
 from app.scraper.search_parser import SuumoSearchParser, SearchParserError
+from app.scraper.url_rules import classify_suumo_url
 from app.scraper.auth import SuumoAuthError, get_favorites_with_login
 from app.exporters.exporter import DataExporter, ExportError
 from app.schema.property_types import PropertyType
@@ -48,6 +49,7 @@ _JAPANESE_KANA_RE = re.compile(r'[\u3040-\u30ff]')
 
 
 def _classify_urls(urls: List[str]) -> tuple[list[str], list[str], list[str]]:
+    """买房 nc_ 详情（含同房源子页）优先归为详情并规范化去重；其余沿用原规则。"""
     detail_urls: List[str] = []
     search_urls: List[str] = []
     invalid_urls: List[str] = []
@@ -55,9 +57,13 @@ def _classify_urls(urls: List[str]) -> tuple[list[str], list[str], list[str]]:
         url = raw_url.strip()
         if not url:
             continue
-        if SuumoSearchParser.is_search_url(url):
+        info = classify_suumo_url(url)
+        if info.kind == 'buy_detail':
+            if info.url not in detail_urls:
+                detail_urls.append(info.url)
+        elif info.kind == 'search':
             search_urls.append(url)
-        elif SuumoScraper.validate_url(url) or BuyScraper.is_buy_url(url):
+        elif info.kind == 'rental_detail':
             detail_urls.append(url)
         else:
             invalid_urls.append(url)
@@ -358,7 +364,10 @@ def scrape_status(task_id: str):
             'total': prog['total'],
             'current_url': prog['current_url'],
             'errors': prog['errors'],
-            'result_count': prog['progress'] - len(prog['errors'])
+            # 只扣除详情级错误：搜索页的空结果/暂时失败等问题不对应某条已抓取的房源
+            'result_count': prog['progress'] - sum(
+                1 for e in prog['errors'] if e.get('url') in set(prog.get('urls') or [])
+            )
         })
 
     # Check DB
@@ -1213,9 +1222,8 @@ def run_scraping_task(app, task_id: str) -> None:
         db.session.commit()
 
         rental_scraper = SuumoScraper()
-        buy_scraper = BuyScraper()
+        buy_scraper = BuyScraper(retry_delay=prog['delay'])
         mapper = FieldMapper()
-        enrich_service = _get_enrichment_service()
         enrich_service = _get_enrichment_service()
 
         try:
@@ -1241,7 +1249,9 @@ def run_scraping_task(app, task_id: str) -> None:
                                 seen.add(url)
                                 combined_urls.append(url)
                     except SearchParserError as e:
-                        prog['errors'].append({'url': search_url, 'error': str(e)})
+                        prog['errors'].append({'url': search_url, 'error': str(e), 'error_type': e.error_type})
+                    # 空结果、结构变更、后续页暂时失败：保留已收集的详情，原因随任务返回
+                    prog['errors'].extend(parser.issues)
 
                 if not combined_urls:
                     task.status = 'failed'
@@ -1298,7 +1308,9 @@ def run_scraping_task(app, task_id: str) -> None:
                             'url': url,
                             'error': 'Could not get property info'
                         })
-                except (SuumoScraperError, BuyScraperError) as e:
+                except BuyScraperError as e:
+                    prog['errors'].append({'url': url, 'error': str(e), 'error_type': e.error_type})
+                except SuumoScraperError as e:
                     prog['errors'].append({
                         'url': url,
                         'error': str(e)
