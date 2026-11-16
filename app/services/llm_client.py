@@ -13,8 +13,18 @@ from typing import Any, Callable, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
-class EmptyLLMResponse(RuntimeError):
-    """模型返回了空内容。中转接口繁忙时常见，按临时失败重试。"""
+try:  # openai、google-genai 都依赖 httpx；Gemini 路径的连接错误是原样抛出的 httpx 异常
+    import httpx
+    _TRANSPORT_ERRORS: tuple = (httpx.TransportError,)
+except ImportError:  # pragma: no cover
+    _TRANSPORT_ERRORS = ()
+
+# 单次请求的超时（秒）。SDK 默认读超时 600 秒，一个卡住的请求会长时间占着全局并发名额
+REQUEST_TIMEOUT_SECONDS = 120
+
+
+class LLMResponseFailed(RuntimeError):
+    """Responses API 返回 status=failed（上游出错），按临时失败重试。"""
 
 
 class LLMUnavailable(RuntimeError):
@@ -43,7 +53,7 @@ def _status_of(exc: BaseException) -> Optional[int]:
 
 def is_transient_llm_error(exc: BaseException) -> bool:
     """判断大模型调用失败是否值得重试。有 HTTP 状态码时以状态码为准。"""
-    if isinstance(exc, (EmptyLLMResponse, ConnectionError, TimeoutError)):
+    if isinstance(exc, (LLMResponseFailed, ConnectionError, TimeoutError) + _TRANSPORT_ERRORS):
         return True
     status = _status_of(exc)
     if status is not None:
@@ -57,10 +67,11 @@ def is_transient_llm_error(exc: BaseException) -> bool:
 class LLMGate:
     """所有 LLMClient 共用的调用闸门。
 
-    - 限制同时进行的调用数：多个抓取任务同时跑时，中转接口会限流或回空内容。
-    - 临时失败和空回复按 retry_delays 退避重试，其他错误直接抛出。
-    - 连续 breaker_threshold 次重试用尽就熔断 breaker_cooldown 秒，期间直接失败，
-      避免接口长时间不可用时每次调用都等满重试，把抓取拖慢几十倍。
+    - 限制同时进行的调用数：多个抓取任务同时跑时，中转接口会限流。
+    - 临时失败按 retry_delays 退避重试，其他错误直接抛出。空回复照常返回，不算失败：
+      地标等短输出平时就常为空，重试只会拖慢抓取。
+    - 连续 breaker_threshold 次重试用尽就熔断 breaker_cooldown 秒，期间直接失败
+      （排队等名额的、等待重试的也一样），避免接口长时间不可用时把抓取拖慢几十倍。
     """
 
     def __init__(self, max_concurrency: int = 2, retry_delays=(3, 10, 30),
@@ -79,16 +90,15 @@ class LLMGate:
         self._open_until = 0.0
 
     def call(self, fn: Callable[[], Any]) -> Any:
-        with self._lock:
-            if self._clock() < self._open_until:
-                raise LLMUnavailable('大模型接口连续失败，冷却期内暂停调用')
         attempt = 0
         while True:
+            self._raise_if_open()
             try:
                 with self._slots:
-                    text = fn()
-                if text is None or not str(text).strip():
-                    raise EmptyLLMResponse('大模型返回空内容')
+                    self._raise_if_open()  # 排队等名额期间熔断打开了，就不再发请求
+                    result = fn()
+            except LLMUnavailable:
+                raise
             except Exception as exc:
                 if not is_transient_llm_error(exc):
                     raise
@@ -103,10 +113,17 @@ class LLMGate:
                 self._sleep(delay)
                 continue
             self._record_success()
-            return text
+            return result
+
+    def _raise_if_open(self) -> None:
+        with self._lock:
+            if self._clock() < self._open_until:
+                raise LLMUnavailable('大模型接口连续失败，冷却期内暂停调用')
 
     def _record_success(self) -> None:
         with self._lock:
+            if self._clock() < self._open_until:
+                return  # 熔断前发出的调用在冷却期内成功：不提前恢复，等冷却结束再试
             self._failures = 0
             self._open_until = 0.0
 
@@ -195,17 +212,18 @@ class LLMClient:
     def _get_gemini(self):
         if self._gemini_client is None:
             from google.genai import Client
-            kwargs = {'api_key': self.api_key}
+            from google.genai.types import HttpOptions
+            options = {'timeout': REQUEST_TIMEOUT_SECONDS * 1000}  # 毫秒
             if self.base_url and 'generativelanguage.googleapis.com' not in self.base_url:
-                from google.genai.types import HttpOptions
-                kwargs['http_options'] = HttpOptions(base_url=self.base_url)
-            self._gemini_client = Client(**kwargs)
+                options['base_url'] = self.base_url
+            self._gemini_client = Client(api_key=self.api_key, http_options=HttpOptions(**options))
         return self._gemini_client
 
     def _get_openai(self):
         if self._openai_client is None:
             from openai import OpenAI
-            kwargs = {'api_key': self.api_key}
+            # 重试统一交给 LLMGate（退避更长、计入熔断），SDK 自带的快速重试关掉
+            kwargs = {'api_key': self.api_key, 'timeout': REQUEST_TIMEOUT_SECONDS, 'max_retries': 0}
             if self.base_url:
                 kwargs['base_url'] = self.base_url
             self._openai_client = OpenAI(**kwargs)
@@ -427,6 +445,12 @@ class LLMClient:
 
     @staticmethod
     def _response_output_text(response: Any) -> str:
+        # status=failed 是上游出错，交给 LLMGate 重试；incomplete（如输出额度用完）照常返回已有内容
+        field = (lambda obj, key: obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None))
+        if field(response, 'status') == 'failed':
+            error = field(response, 'error')
+            raise LLMResponseFailed(str((error and field(error, 'message')) or error or 'response status failed'))
+
         output_text = getattr(response, 'output_text', None)
         if output_text is not None:
             return output_text
