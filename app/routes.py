@@ -649,6 +649,32 @@ def get_formats():
     })
 
 
+# ==================== Version API ====================
+
+def _running_commit() -> str:
+    """进程启动时代码所在的提交。只重启不更新代码、或拉了代码没重启，都能从这里看出来。"""
+    if os.environ.get('APP_COMMIT'):
+        return os.environ['APP_COMMIT']
+    try:
+        import subprocess
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return 'unknown'
+
+
+_RUNNING_COMMIT = _running_commit()
+
+
+@api_bp.route('/version', methods=['GET'])
+def get_version():
+    """部署核对用：返回正在运行的代码提交。"""
+    return jsonify({'commit': _RUNNING_COMMIT})
+
+
 # ==================== Settings API ====================
 
 @api_bp.route('/settings', methods=['GET'])
@@ -931,17 +957,31 @@ def summarize_property(property_id: int):
         return jsonify({'error': str(e)}), 500
 
 
+DETAIL_ASSET_FIELDS = ('title', 'summary', 'tags')
+
+
 @api_bp.route('/property/<int:property_id>/detail-assets', methods=['POST'])
 def property_detail_assets(property_id: int):
-    """Ensure translation and pre-generate title/summary candidates for detail page."""
+    """Ensure translation and pre-generate title/summary candidates for detail page.
+
+    JSON body（都可省略，省略时与原行为一致）:
+      fields: 只生成其中几项，取值 title / summary / tags，默认全部
+      translate: false 时不翻译（批量补标题时用，省掉整条物件的翻译调用）
+      force_translate: 已翻译过也重新翻译
+    """
     prop = db.session.get(Property, property_id)
     if not prop:
         return jsonify({'error': 'Property not found'}), 404
 
-    force_translate = request.json.get('force_translate', False) if request.is_json else False
+    body = request.get_json(silent=True) or {}
+    fields = body.get('fields') or list(DETAIL_ASSET_FIELDS)
+    if not isinstance(fields, list) or any(f not in DETAIL_ASSET_FIELDS for f in fields):
+        return jsonify({'error': 'fields 只能是 title、summary、tags'}), 400
+    force_translate = bool(body.get('force_translate', False))
+    want_translate = body.get('translate', True) is not False
 
     translated = prop.translated
-    if force_translate or not translated:
+    if want_translate and (force_translate or not translated):
         settings = Settings.get()
         if settings.llm_api_key:
             try:
@@ -956,9 +996,9 @@ def property_detail_assets(property_id: int):
                 logger.error(f"Detail asset translation error: {e}")
 
     try:
-        title_items = _generate_property_summary_items(prop, 'title')
-        summary_items = _generate_property_summary_items(prop, 'summary')
-        tag_items = _generate_property_summary_items(prop, 'tags')
+        title_items = _generate_property_summary_items(prop, 'title') if 'title' in fields else []
+        summary_items = _generate_property_summary_items(prop, 'summary') if 'summary' in fields else []
+        tag_items = _generate_property_summary_items(prop, 'tags') if 'tags' in fields else []
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
