@@ -651,19 +651,25 @@ def get_formats():
 
 # ==================== Version API ====================
 
-def _running_commit() -> str:
+def _running_commit(root: str = None) -> str:
     """进程启动时代码所在的提交。只重启不更新代码、或拉了代码没重启，都能从这里看出来。"""
     if os.environ.get('APP_COMMIT'):
         return os.environ['APP_COMMIT']
+    root = root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         import subprocess
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        out = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, capture_output=True, text=True, timeout=5)
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
+
+        def git(*args):
+            out = subprocess.run(['git', *args], cwd=root, capture_output=True, text=True, timeout=5)
+            return out.stdout.strip() if out.returncode == 0 else ''
+
+        # 代码目录本身必须是仓库根：被复制进别的仓库时，git 会往上找到那个仓库，拿它的提交冒充
+        top = git('rev-parse', '--show-toplevel')
+        if not top or os.path.realpath(top) != os.path.realpath(root):
+            return 'unknown'
+        return git('rev-parse', 'HEAD') or 'unknown'
     except Exception:
-        pass
-    return 'unknown'
+        return 'unknown'
 
 
 _RUNNING_COMMIT = _running_commit()
@@ -964,21 +970,29 @@ DETAIL_ASSET_FIELDS = ('title', 'summary', 'tags')
 def property_detail_assets(property_id: int):
     """Ensure translation and pre-generate title/summary candidates for detail page.
 
-    JSON body（都可省略，省略时与原行为一致）:
-      fields: 只生成其中几项，取值 title / summary / tags，默认全部
+    JSON body（都可省略，省略时与原行为一致；非 JSON 请求体按省略处理）:
+      fields: 只生成其中几项，取值 title / summary / tags，默认全部；没请求的项返回空数组
       translate: false 时不翻译（批量补标题时用，省掉整条物件的翻译调用）
       force_translate: 已翻译过也重新翻译
+    参数写错时返回 400，不按默认值悄悄多跑大模型。
     """
     prop = db.session.get(Property, property_id)
     if not prop:
         return jsonify({'error': 'Property not found'}), 404
 
-    body = request.get_json(silent=True) or {}
-    fields = body.get('fields') or list(DETAIL_ASSET_FIELDS)
-    if not isinstance(fields, list) or any(f not in DETAIL_ASSET_FIELDS for f in fields):
-        return jsonify({'error': 'fields 只能是 title、summary、tags'}), 400
-    force_translate = bool(body.get('force_translate', False))
-    want_translate = body.get('translate', True) is not False
+    body = {}
+    if request.is_json and request.get_data(cache=True).strip():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({'error': '请求体必须是 JSON 对象'}), 400
+    fields = body.get('fields', list(DETAIL_ASSET_FIELDS))
+    if not isinstance(fields, list) or not fields or any(f not in DETAIL_ASSET_FIELDS for f in fields):
+        return jsonify({'error': 'fields 必须是非空数组，取值 title、summary、tags'}), 400
+    for flag in ('translate', 'force_translate'):
+        if flag in body and not isinstance(body[flag], bool):
+            return jsonify({'error': f'{flag} 必须是 true 或 false'}), 400
+    force_translate = body.get('force_translate', False)
+    want_translate = body.get('translate', True)
 
     translated = prop.translated
     if want_translate and (force_translate or not translated):

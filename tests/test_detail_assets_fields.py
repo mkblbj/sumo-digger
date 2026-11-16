@@ -5,6 +5,7 @@
 且不传参数时行为不变（草稿「重新生成 AI 文案」仍走默认）。
 """
 
+import os
 import subprocess
 
 import pytest
@@ -90,10 +91,62 @@ def test_unknown_field_is_rejected(app, calls):
     assert calls['generated'] == []
 
 
+@pytest.mark.parametrize('body', [['title'], 'title', 5])
+def test_non_object_json_body_is_rejected(app, calls, body):
+    res = post_assets(app, body)
+
+    assert res.status_code == 400
+    assert calls['generated'] == []
+
+
+@pytest.mark.parametrize('flag', ['translate', 'force_translate'])
+@pytest.mark.parametrize('value', ['false', 0, None])
+def test_flags_must_be_boolean(app, calls, flag, value):
+    res = post_assets(app, {'fields': ['title'], flag: value})
+
+    assert res.status_code == 400, '不是布尔值时拒绝，免得悄悄多跑一次翻译'
+    assert calls['translated'] == 0
+    assert calls['generated'] == []
+
+
+def test_empty_fields_is_rejected(app, calls):
+    res = post_assets(app, {'fields': []})
+
+    assert res.status_code == 400
+    assert calls['generated'] == []
+
+
+def test_malformed_json_is_rejected(app, calls):
+    url = f"/api/property/{app.config['PROP_ID']}/detail-assets"
+    res = app.test_client().post(url, data='{bad', content_type='application/json')
+
+    assert res.status_code == 400
+    assert calls['generated'] == []
+
+
+def test_empty_json_body_and_non_json_body_keep_default(app, calls):
+    url = f"/api/property/{app.config['PROP_ID']}/detail-assets"
+    client = app.test_client()
+
+    assert client.post(url, data='', content_type='application/json').status_code == 200
+    assert client.post(url, data='a=1', content_type='application/x-www-form-urlencoded').status_code == 200
+    assert calls['generated'] == ['title', 'summary', 'tags'] * 2
+
+
 def test_version_reports_running_commit(app):
     res = app.test_client().get('/api/version')
 
     assert res.status_code == 200
     commit = res.get_json()['commit']
-    expected = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+    root = os.path.dirname(os.path.dirname(os.path.abspath(routes.__file__)))
+    expected = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, capture_output=True, text=True).stdout.strip()
     assert commit == expected
+
+
+def test_version_unknown_when_code_is_not_the_repo_root(tmp_path):
+    parent = tmp_path / 'other-repo'
+    child = parent / 'sumo-digger'
+    child.mkdir(parents=True)
+    subprocess.run(['git', 'init', '-q', str(parent)], check=True)
+
+    assert routes._running_commit(str(child)) == 'unknown', '代码目录不是仓库根时，不能拿别的仓库的提交冒充'
