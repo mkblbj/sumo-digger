@@ -3,10 +3,130 @@
 import base64
 import json
 import logging
+import os
+import random
 import re
-from typing import Any, List, Optional, Tuple
+import threading
+import time
+from typing import Any, Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+class EmptyLLMResponse(RuntimeError):
+    """模型返回了空内容。中转接口繁忙时常见，按临时失败重试。"""
+
+
+class LLMUnavailable(RuntimeError):
+    """连续失败后熔断：冷却期内直接失败，不再排队等待重试，免得拖慢抓取。"""
+
+
+# 临时失败：限流、超时、网关错误、中转接口繁忙。鉴权、参数错误、余额不足等不在其中，直接抛出
+_TRANSIENT_STATUS = (408, 409, 425, 429)
+_TRANSIENT_CLASS_HINTS = ('RateLimit', 'Timeout', 'Connection', 'ServiceUnavailable', 'InternalServer', 'Overloaded')
+_TRANSIENT_MESSAGE_HINTS = (
+    'rate limit', 'too many requests', 'timeout', 'timed out', 'temporarily', 'overloaded',
+    'unavailable', 'try again', 'busy', 'resource_exhausted', 'bad gateway', 'gateway time',
+    'connection reset', 'connection aborted', 'connection error', 'remote end closed',
+    '负载', '繁忙', '稍后', '限流', '超时',
+)
+
+
+def _status_of(exc: BaseException) -> Optional[int]:
+    for attr in ('status_code', 'code', 'status'):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    value = getattr(getattr(exc, 'response', None), 'status_code', None)
+    return value if isinstance(value, int) else None
+
+
+def is_transient_llm_error(exc: BaseException) -> bool:
+    """判断大模型调用失败是否值得重试。有 HTTP 状态码时以状态码为准。"""
+    if isinstance(exc, (EmptyLLMResponse, ConnectionError, TimeoutError)):
+        return True
+    status = _status_of(exc)
+    if status is not None:
+        return status in _TRANSIENT_STATUS or status >= 500
+    if any(hint in type(exc).__name__ for hint in _TRANSIENT_CLASS_HINTS):
+        return True
+    message = str(exc).lower()
+    return any(hint in message for hint in _TRANSIENT_MESSAGE_HINTS)
+
+
+class LLMGate:
+    """所有 LLMClient 共用的调用闸门。
+
+    - 限制同时进行的调用数：多个抓取任务同时跑时，中转接口会限流或回空内容。
+    - 临时失败和空回复按 retry_delays 退避重试，其他错误直接抛出。
+    - 连续 breaker_threshold 次重试用尽就熔断 breaker_cooldown 秒，期间直接失败，
+      避免接口长时间不可用时每次调用都等满重试，把抓取拖慢几十倍。
+    """
+
+    def __init__(self, max_concurrency: int = 2, retry_delays=(3, 10, 30),
+                 breaker_threshold: int = 5, breaker_cooldown: float = 300,
+                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic, jitter: float = 0.2):
+        self._slots = threading.BoundedSemaphore(max(1, int(max_concurrency)))
+        self.retry_delays = tuple(retry_delays)
+        self.breaker_threshold = max(1, int(breaker_threshold))
+        self.breaker_cooldown = breaker_cooldown
+        self._sleep = sleep
+        self._clock = clock
+        self._jitter = jitter
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._open_until = 0.0
+
+    def call(self, fn: Callable[[], Any]) -> Any:
+        with self._lock:
+            if self._clock() < self._open_until:
+                raise LLMUnavailable('大模型接口连续失败，冷却期内暂停调用')
+        attempt = 0
+        while True:
+            try:
+                with self._slots:
+                    text = fn()
+                if text is None or not str(text).strip():
+                    raise EmptyLLMResponse('大模型返回空内容')
+            except Exception as exc:
+                if not is_transient_llm_error(exc):
+                    raise
+                if attempt >= len(self.retry_delays):
+                    self._record_failure()
+                    raise
+                delay = self.retry_delays[attempt]
+                if self._jitter:
+                    delay *= 1 + random.uniform(-self._jitter, self._jitter)
+                attempt += 1
+                logger.warning(f"LLM call failed ({type(exc).__name__}), retry {attempt}/{len(self.retry_delays)} in {delay:.1f}s: {exc}")
+                self._sleep(delay)
+                continue
+            self._record_success()
+            return text
+
+    def _record_success(self) -> None:
+        with self._lock:
+            self._failures = 0
+            self._open_until = 0.0
+
+    def _record_failure(self) -> None:
+        with self._lock:
+            self._failures += 1
+            if self._failures >= self.breaker_threshold:
+                self._open_until = self._clock() + self.breaker_cooldown
+                logger.error(f"LLM calls failed {self._failures} times in a row; pausing for {self.breaker_cooldown}s")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# 进程内所有任务共用。LLM_MAX_CONCURRENCY 可按中转接口的并发额度调整
+_DEFAULT_GATE = LLMGate(max_concurrency=_env_int('LLM_MAX_CONCURRENCY', 2))
 
 # Provider constants
 PROVIDER_GEMINI = 'gemini'
@@ -62,11 +182,12 @@ class LLMClient:
     """
 
     def __init__(self, base_url: str, api_key: str, model: str,
-                 provider: str = PROVIDER_AUTO):
+                 provider: str = PROVIDER_AUTO, gate: Optional[LLMGate] = None):
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
         self.provider = provider if provider != PROVIDER_AUTO else detect_provider(base_url, model)
+        self.gate = gate or _DEFAULT_GATE
 
         self._gemini_client = None
         self._openai_client = None
@@ -106,6 +227,9 @@ class LLMClient:
         Returns:
             Response text string
         """
+        return self.gate.call(lambda: self._dispatch_chat(messages, temperature, max_tokens))
+
+    def _dispatch_chat(self, messages: list, temperature: float, max_tokens: int) -> str:
         if self.provider == PROVIDER_GEMINI:
             return self._gemini_chat(messages, temperature, max_tokens)
         if self.provider == PROVIDER_OPENAI:
@@ -134,6 +258,12 @@ class LLMClient:
         Returns:
             Response text string
         """
+        return self.gate.call(lambda: self._dispatch_vision(
+            prompt, images, mime_type, system_prompt, temperature, max_tokens))
+
+    def _dispatch_vision(self, prompt: str, images: List[bytes], mime_type: str,
+                         system_prompt: Optional[str], temperature: float,
+                         max_tokens: int) -> str:
         if self.provider == PROVIDER_GEMINI:
             return self._gemini_vision(prompt, images, mime_type,
                                        system_prompt, temperature, max_tokens)
