@@ -827,18 +827,10 @@ def _generate_property_summary_items(prop: Property, summary_type: str):
     ptype = _resolve_property_type(data)
 
     if summary_type == 'title':
-        templates = {
-            PropertyType.RENTAL: '地区（区或者市后面的町名） + 特点词 + 租房 + 户型 + 一户建/公寓塔楼 + 特点短句',
-            PropertyType.MANSION: '地区 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
-            PropertyType.HOUSE: '地区 + 特点 + 户型 + 一户建 + 特点短句',
-            PropertyType.LAND: '地区 + 特点 + 土地面积 + 土地 + 特点短句',
-            PropertyType.INVESTMENT: '地区 + 特点 + 户型/类型 + 投资物件 + 特点短句',
-            PropertyType.OTHER: '地区 + 特点 + 物件类型 + 特点短句',
-        }
-        from app.services.ai_enrichment import _build_title_system_prompt
+        from app.services.ai_enrichment import TITLE_TEMPLATES, _build_title_system_prompt
         system = _build_title_system_prompt(
             ptype,
-            templates.get(ptype, templates[PropertyType.OTHER]),
+            TITLE_TEMPLATES.get(ptype, TITLE_TEMPLATES[PropertyType.OTHER]),
             data,
         )
         limit = 3

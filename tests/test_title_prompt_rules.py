@@ -46,3 +46,17 @@ def test_title_prompt_has_hard_rules_and_layout_raw():
     # (2) layout_raw value fed into the prop context (user message)
     full = _all_text(llm.calls[0])
     assert '1LDK' in full
+
+
+def test_buy_title_prompt_starts_place_at_town_level():
+    """2026-11-21 客户要求：所有物件标题的地名从町名/丁目开始，买房不能再以「千葉市緑区」开头。"""
+    for ptype in (PropertyType.HOUSE, PropertyType.MANSION, PropertyType.LAND, PropertyType.INVESTMENT):
+        llm = CapturingLLM(json.dumps(['土気町翻新3LDK一户建', 'あすみが丘7丁目一户建', '土気町宽敞一户建'],
+                                      ensure_ascii=False))
+        service = AIEnrichmentService(llm_client=llm)
+        service._gen_title_candidates({'basic.address': '千葉県千葉市緑区土気町'}, ptype)
+
+        system_text = llm.calls[0]['messages'][0]['content']
+        assert '町名/丁目' in system_text, ptype
+        assert '禁止' in system_text and '市/区' in system_text, ptype
+        assert '租房' not in system_text, ptype  # 租房专有规则不套到买房

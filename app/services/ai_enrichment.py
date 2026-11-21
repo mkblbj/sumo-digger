@@ -52,6 +52,19 @@ def fetch_jpy_cny_rate() -> float:
 
 # ── Investment calculations ──────────────────────────────────────────────
 
+# 司法书士费：客户要求买房默认 60000 日元（2026-11-21），不再让大模型估
+SCRIVENER_FEE_DEFAULT = 60000
+
+# 标题格式参考。买房地名同样从町名/丁目开始（2026-11-21 客户要求「所有物件」）
+TITLE_TEMPLATES = {
+    PropertyType.RENTAL: '地区（区或者市后面的町名） + 特点词 + 租房 + 户型 + 一户建/公寓塔楼 + 特点短句',
+    PropertyType.MANSION: '町名/丁目 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
+    PropertyType.HOUSE: '町名/丁目 + 特点 + 户型 + 一户建 + 特点短句',
+    PropertyType.LAND: '町名/丁目 + 特点 + 土地面积 + 土地 + 特点短句',
+    PropertyType.INVESTMENT: '町名/丁目 + 特点 + 户型/类型 + 投资物件 + 特点短句',
+    PropertyType.OTHER: '町名/丁目 + 特点 + 物件类型 + 特点短句',
+}
+
 def calc_brokerage_fee(price_jpy: int) -> int:
     """中介费 = (售价 x 3% + 60000) x 1.1"""
     return int((price_jpy * 0.03 + 60000) * 1.1)
@@ -181,6 +194,9 @@ class AIEnrichmentService:
     def _calc_investment_analysis(self, data: Dict[str, Any], ptype: PropertyType) -> None:
         if ptype == PropertyType.RENTAL:
             return
+
+        if data.get('analysis.scrivener_fee') is None:
+            data['analysis.scrivener_fee'] = SCRIVENER_FEE_DEFAULT
 
         price = data.get('basic.price_jpy')
         if not price:
@@ -505,7 +521,6 @@ class AIEnrichmentService:
             ('analysis.acquisition_tax', '不动产取得税'),
             ('analysis.registration_tax', '登录免许税'),
             ('analysis.stamp_tax', '印花税'),
-            ('analysis.scrivener_fee', '司法书士费'),
             ('analysis.fixed_asset_tax', '固定资产税'),
             ('analysis.city_planning_tax', '都市计划税'),
         ]
@@ -525,7 +540,7 @@ class AIEnrichmentService:
                         "返回JSON对象，key是费用名称，value是整数金额。不要单位。\n"
                         "参考规则：不动产取得税约为评估额x3-4%，登录免许税约为评估额x0.4-2%，"
                         "印花税按合同金额分段（1000万以下1万、5000万以下2万等），"
-                        "司法书士费通常10-15万，固定资产税约评估额x1.4%，都市计划税约评估额x0.3%。"
+                        "固定资产税约评估额x1.4%，都市计划税约评估额x0.3%。"
                     )},
                     {"role": "user", "content": f"物件价格: {price}日元\n请估算: {labels_str}"},
                 ],
@@ -561,15 +576,7 @@ class AIEnrichmentService:
         return '\n'.join(lines[:40])
 
     def _title_template_for_type(self, ptype: PropertyType) -> str:
-        templates = {
-            PropertyType.RENTAL: '地区（区或者市后面的町名） + 特点词 + 租房 + 户型 + 一户建/公寓塔楼 + 特点短句',
-            PropertyType.MANSION: '地区 + 特点 + 户型 + 类型（塔楼/公寓） + 特点短句',
-            PropertyType.HOUSE: '地区 + 特点 + 户型 + 一户建 + 特点短句',
-            PropertyType.LAND: '地区 + 特点 + 土地面积 + 土地 + 特点短句',
-            PropertyType.INVESTMENT: '地区 + 特点 + 户型/类型 + 投资物件 + 特点短句',
-            PropertyType.OTHER: '地区 + 特点 + 物件类型 + 特点短句',
-        }
-        return templates.get(ptype, templates[PropertyType.OTHER])
+        return TITLE_TEMPLATES.get(ptype, TITLE_TEMPLATES[PropertyType.OTHER])
 
     def _normalize_text_candidates(self, values: Any, limit: int,
                                    preferred_key: Optional[str] = None,
@@ -612,9 +619,10 @@ def _build_title_system_prompt(ptype: PropertyType, title_rule: str,
                                data: Optional[Dict[str, Any]] = None) -> str:
     """Build the title system prompt.
 
-    For RENTAL, apply hard rules the customer requires: no 都/道/府/県/市/区
-    level big place names (start at 町名/丁目), must contain 租房, must use the
-    original Japanese layout notation (1LDK/1K/ワンルーム), keep length <= 30.
+    All types: place names start at 町名/丁目, no 都/道/府/県/市/区 prefix
+    (customer asked for rentals first, then all property types on 2026-11-21).
+    RENTAL additionally: must contain 租房, must use the original Japanese
+    layout notation (1LDK/1K/ワンルーム), keep length <= 30.
     """
     layout_raw = ''
     if data:
@@ -638,6 +646,8 @@ def _build_title_system_prompt(ptype: PropertyType, title_rule: str,
         "你是日本房产信息编辑。必须使用简体中文生成标题，严禁使用日语作为标题主体语言。\n"
         "保留日本地名/站名原文，但其他描述必须是简体中文。\n"
         "请根据物件信息生成 3 个标题候选，返回 JSON 数组。\n"
+        "【硬性规则】地名必须从町名/丁目级别开始（如地址“千葉県千葉市緑区おゆみ野南４”只取“おゆみ野南4丁目”），"
+        "严禁在标题里写都/道/府/县/市/区级别的大地名（禁止出现“千葉市緑区”“千叶市绿区”这样的前缀）。\n"
         "标题规则：每个标题 25 字左右，绝不能超过 30 字，不加句号，不要解释文字。\n"
         f"优先遵循格式：{title_rule}"
     )
