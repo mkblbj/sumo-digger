@@ -33,6 +33,8 @@ _VALUE_NOISE_TEXT_RE = re.compile(r'支払シミュレーション|周辺環境|
 _LINE_MARK = '\ue000'
 _NOISE_LINES = {'[', ']', '[]', '□', '■'}
 _H1_PRICE_TAIL_RE = re.compile(r'\s*[\d,.]+\s*(?:億\s*[\d,.]*\s*)?万?円.*$')
+# 页面脚本里的「特徴ピックアップ」：tokuchoPickupList : ["南向き","システムキッチン",…]
+_PICKUP_SCRIPT_RE = re.compile(r'tokuchoPickupList\s*:\s*\[([^\]]*)\]')
 
 
 @dataclass
@@ -76,6 +78,7 @@ class BuyPropertyData:
     image_urls: List[str] = field(default_factory=list)
     video_urls: List[str] = field(default_factory=list)
     vr_links: List[str] = field(default_factory=list)
+    pickup_tags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for export"""
@@ -145,6 +148,8 @@ class BuyPropertyData:
             d['_video_urls'] = self.video_urls
         if self.vr_links:
             d['_vr_links'] = self.vr_links
+        if self.pickup_tags:
+            d['特徴ピックアップ'] = ' / '.join(self.pickup_tags)
         # Add all table_data entries that aren't already captured
         for k, v in self.table_data.items():
             if k not in d:
@@ -289,6 +294,7 @@ class BuyScraper:
 
             # Features
             data.features = self._extract_features(soup)
+            data.pickup_tags = self._extract_pickup_tags(soup)
 
             # Images
             data.image_urls = self._extract_image_urls(soup, classify_suumo_url(url).property_id)
@@ -356,6 +362,9 @@ class BuyScraper:
                 data[label] = value
 
         for row in soup.select('tr'):
+            # 页面底部资料请求表单（お名前、その他「この情報を他の問い合わせにも自動で反映」…）不是物件信息
+            if row.find_parent('form') is not None:
+                continue
             headers = row.find_all('th')
             values = row.find_all('td')
             if len(headers) == 2 and len(values) >= 2:
@@ -366,12 +375,32 @@ class BuyScraper:
 
         # Also extract from dottable format (used in some buy pages)
         for dt in soup.select('dt.dottable-title, div.dottable-title'):
+            if dt.find_parent('form') is not None:
+                continue
             dd = dt.find_next_sibling('dd') or dt.find_next('dd')
             if dd:
                 put(self._label(dt), self._value(dd))
 
         return data
 
+
+    def _extract_pickup_tags(self, soup: BeautifulSoup) -> List[str]:
+        """「特徴ピックアップ」标签（南向き / システムキッチン …）：先读这一节的正文，没有再读页面脚本。"""
+        for heading in soup.find_all(['h2', 'h3']):
+            if self.clean_text(heading.get_text()) != '特徴ピックアップ':
+                continue
+            box = heading.find_parent(class_='secTitleOuterK') or heading
+            body = box.find_next_sibling('div')
+            if body:
+                tags = [self.clean_text(t) for t in body.get_text(' ').split('/')]
+                tags = [t for t in tags if t]
+                if tags:
+                    return tags
+        for script in soup.find_all('script'):
+            m = _PICKUP_SCRIPT_RE.search(script.get_text() or '')
+            if m:
+                return [t for t in (self.clean_text(x) for x in re.findall(r'"([^"]*)"', m.group(1))) if t]
+        return []
 
     def _extract_location(self, soup: BeautifulSoup, table_data: Dict[str, str]) -> str:
         selectors = [

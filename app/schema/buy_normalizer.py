@@ -49,6 +49,8 @@ _COUNT_KEYS = ('detail.total_units', 'detail.total_lots', 'building.total_units'
 _MANAGEMENT_TOKEN_RE = re.compile(r'自主管理|一部委託|全部委託')
 _ENTRUSTED_RE = re.compile(r'委託(?:\([^)]*\))?')
 _FREE_BUILD_CONDITION = {'無', 'なし', '無し'}
+# 「特徴ピックアップ」里的朝向标签（南向き、東南向き、全居室南向き）；「南面バルコニー」「陽当り良好」不算
+_PICKUP_ORIENTATION_RE = re.compile(r'^(?:全居室)?(南東|南西|北東|北西|東南|西南|東北|西北|南|東|西|北)向き$')
 
 
 def _text(raw: Dict[str, Any], *labels: str) -> str:
@@ -138,6 +140,15 @@ def normalize_buy_fields(data: Dict[str, Any], raw: Dict[str, Any], ptype: Prope
         put('detail.total_floors', total)
     if token and is_missing_text(data.get('detail.structure') or ''):
         put('detail.structure', token)
+
+    # 朝向：物件表「向き」优先。一户建物件概要没有这一栏，取「特徴ピックアップ」的朝向标签；
+    # 不按道路方位推断（北侧临路的房子常常朝南）
+    if is_missing_text(str(data.get('detail.orientation') or '')):
+        for tag in _text(raw, '特徴ピックアップ').split('/'):
+            m = _PICKUP_ORIENTATION_RE.match(nfkc(tag).strip())
+            if m:
+                put('detail.orientation', m.group(1))
+                break
 
     # 建成（预计完成）年月：保留原文，后台按「YYYY年M月」解析
     built = _text(raw, '完成時期(築年月)', '築年月')
