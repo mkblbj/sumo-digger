@@ -958,6 +958,18 @@ def summarize_property(property_id: int):
 DETAIL_ASSET_FIELDS = ('title', 'summary', 'tags')
 
 
+@api_bp.route('/property/<int:property_id>', methods=['GET'])
+def get_property(property_id: int):
+    """只读：爬虫存的原始字段（不翻译、不调大模型）。
+
+    日宜找房清理存量买房时据此取阳台面积、税费原值；detail-assets 缺标题时会现场生成，不适合批量读。
+    """
+    prop = db.session.get(Property, property_id)
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+    return jsonify({'property': prop.to_dict(use_translated=False)})
+
+
 @api_bp.route('/property/<int:property_id>/detail-assets', methods=['POST'])
 def property_detail_assets(property_id: int):
     """Ensure translation and pre-generate title/summary candidates for detail page.
